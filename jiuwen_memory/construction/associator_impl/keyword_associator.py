@@ -9,8 +9,6 @@
 
 from __future__ import annotations
 
-from typing import List
-
 from jiuwen_memory.common.feature_extractor.base import FeatureExtractor, FeatureExtractorProducer
 from jiuwen_memory.common.log import get_logger
 from jiuwen_memory.common.type_def import MemoryUnit, Relation
@@ -33,7 +31,7 @@ class KeywordAssociator(Associator):
     def health(self) -> None:
         return None
 
-    def associate(self, units: List[MemoryUnit]) -> List[Relation]:
+    def associate(self, units: list[MemoryUnit]) -> list[Relation]:
         logger.info("KeywordAssociator: received %d units", len(units))
         for u in units:
             logger.info(
@@ -47,7 +45,7 @@ class KeywordAssociator(Associator):
             "KeywordAssociator: keywords extracted — %s",
             {uid[:8]: sorted(kws) for uid, kws in toks.items()},
         )
-        relations: List[Relation] = []
+        relations: list[Relation] = []
         for index, a in enumerate(units):
             remaining_units = units[index + 1:]
             for b in remaining_units:

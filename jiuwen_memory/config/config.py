@@ -20,7 +20,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional
+from collections.abc import Mapping
+from typing import Any
 
 from .context import AssemblyContext
 
@@ -28,11 +29,11 @@ from .context import AssemblyContext
 class Config:
     """一次装配的用户配置（两级命名空间字典，解析后只读）。"""
 
-    def __init__(self, data: Optional[Mapping[str, Any]] = None) -> None:
+    def __init__(self, data: Mapping[str, Any] | None = None) -> None:
         self._data = dict(data or {})
 
     @classmethod
-    def from_dict(cls, data: Optional[Mapping[str, Any]]) -> "Config":
+    def from_dict(cls, data: Mapping[str, Any] | None) -> "Config":
         """从配置字典构造。"""
         return cls(data or {})
 
@@ -42,7 +43,7 @@ class Config:
         with open(path, "r", encoding="utf-8") as fh:
             return cls.from_dict(_load_yaml(fh.read()))
 
-    def context(self, known_top_names: Optional[set] = None) -> AssemblyContext:
+    def context(self, known_top_names: set | None = None) -> AssemblyContext:
         """解析成 :class:`AssemblyContext`；``known_top_names`` 非空时校验顶层段名。"""
         return AssemblyContext.from_dict(self._data, known_top_names=known_top_names)
 

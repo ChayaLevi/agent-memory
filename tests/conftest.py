@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable, Optional
+from typing import Any
 
 import pytest
 
@@ -134,12 +135,12 @@ def make_unit(
     *,
     scope: Scope = DEFAULT_SCOPE,
     lifecycle: LifecycleState = LifecycleState.ACTIVE,
-    t_event: Optional[datetime] = None,
-    t_valid: Optional[datetime] = None,
-    t_invalid: Optional[datetime] = None,
-    t_message: Optional[datetime] = None,
+    t_event: datetime | None = None,
+    t_valid: datetime | None = None,
+    t_invalid: datetime | None = None,
+    t_message: datetime | None = None,
     supersedes: str = "",
-    tags: Optional[list[str]] = None,
+    tags: list[str] | None = None,
 ) -> MemoryUnit:
     return MemoryUnit(
         id=uid,

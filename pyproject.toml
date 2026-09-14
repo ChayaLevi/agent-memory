@@ -100,4 +100,7 @@ target-version = "py311"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I"]
+# UP006/UP035/UP045 固化 AGENTS.md 的类型标注规约（PEP 585/604：list[X]、dict[K,V]、
+# X | None）。只选这三条而非整个 UP：UP 全量还会带来 str-enum、datetime.UTC 等 200+ 条
+# 与本规约无关的改动，属于独立的风格决策。
+select = ["E", "F", "W", "I", "UP006", "UP035", "UP045"]
