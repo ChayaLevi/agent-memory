@@ -27,7 +27,11 @@ from jiuwen_memory.control.types import (
     SpaceStatus,
     SpaceUsage,
 )
-from jiuwen_memory.storage.storage import Storage, StorageProducer
+from jiuwen_memory.storage.store_manager import (
+    StoreManager,
+    StoreManagerProducer,
+    resolve_name,
+)
 
 logger = get_logger(__name__)
 
@@ -295,9 +299,8 @@ def _check_status_transition(current: SpaceStatus, target: SpaceStatus) -> None:
 class KVSpaceManager(SpaceManager):
     """SpaceManager backed by KVStore."""
 
-    def __init__(self, storage: Storage) -> None:
-        self._storage = storage
-        self._kv = storage.kv
+    def __init__(self, storage: StoreManager, *, kv_name: str = "default") -> None:
+        self._kv = storage.kv(kv_name)
 
     def operator_type(self) -> ControlOperatorType:
         return ControlOperatorType.SPACE
@@ -423,6 +426,14 @@ class KVSpaceManager(SpaceManager):
 
     def archive(self, org: str, space: str) -> SpaceInfo:
         return self.update(org, space, SpacePatch(status=SpaceStatus.ARCHIVED))
+
+    def begin_delete(self, org: str, space: str) -> SpaceInfo:
+        info = self.get(org, space)
+        if info.status in (SpaceStatus.DELETING, SpaceStatus.DELETED):
+            return info
+        info.status = SpaceStatus.DELETING
+        self._kv.update(_scope(org, space), _INFO_KEY, _info_to_bytes(info))
+        return info
 
     def delete(self, org: str, space: str) -> SpaceDeleteResult:
         self._require_space(org, space)
@@ -664,4 +675,7 @@ class KVSpaceManager(SpaceManager):
 
 @SpaceProducer.register("kv")
 def _build(config):
-    return KVSpaceManager(StorageProducer.resolve(config))
+    return KVSpaceManager(
+        StoreManagerProducer.resolve(config),
+        kv_name=resolve_name(config, "kv_store"),
+    )

@@ -1,5 +1,7 @@
 # Configuration and Assembly Guide
 
+Last revised: 2026-09-09
+
 Agent Memory configuration is more than a way to pass YAML fields to a constructor. It is a
 lightweight assembly mechanism built around a default topology, Producer registries, named
 instances, and dependency references. This guide explains how configuration is organized,
@@ -27,8 +29,8 @@ Configuration falls into four main categories:
 
 | Category | Purpose | Primary activation time |
 |---|---|---|
-| Assembly topology | Select component implementations, declare instances, and connect dependencies | `build_kernel()` |
-| Global parameters | Provide capability flags and shared parameters to multiple components | Primarily during `build_kernel()` |
+| Assembly topology | Select component implementations, declare instances, and connect dependencies | `assemble()` |
+| Global parameters | Provide capability flags and shared parameters to multiple components | Primarily during `assemble()` |
 | `ConfigSource` | Late-bind models, credentials, connection addresses, and Prompts | Runtime call path |
 | `PolicyManager` | Manage lifecycle, Space, and other business policies | Runtime |
 
@@ -68,13 +70,13 @@ not a constructor parameter.
 
 ## 2. Complete Assembly Flow
 
-Both SDK and service deployments eventually enter `build_kernel()`:
+Both SDK and service deployments eventually enter `assemble()`:
 
 ```text
 SDK
   Config.from_dict / Config.from_yaml
                  ┬
-                 ├─> build_kernel
+                 ├─> assemble
                  │     ├─ Register every Producer target
 HTTP / MCP       │     ├─ Clear the named-instance cache for this assembly
   load_layer     │     ├─ Merge default_context with user overrides
@@ -107,7 +109,7 @@ automatically.
 The SDK can construct kernel configuration directly:
 
 ```python
-from jiuwen_memory.api import build_kernel
+from jiuwen_memory.api import assemble
 from jiuwen_memory.config import Config
 
 config = Config.from_dict(
@@ -127,19 +129,25 @@ config = Config.from_dict(
     }
 )
 
-kernel = build_kernel(config=config)
-memory_api = kernel.api
+api = assemble(config=config)
 ```
 
 It can also read a YAML file that contains kernel configuration only:
 
 ```python
 config = Config.from_yaml("./memory-config.yml")
-kernel = build_kernel(config=config)
+api = assemble(config=config)
 ```
 
-`Config.from_yaml()` only parses YAML; it does not expand `${ENV_VAR}`. In an SDK deployment, the
-caller must read environment variables or construct the configuration dictionary in advance.
+`Config.from_yaml()` parses YAML and expands `${ENV_VAR}` / `${ENV_VAR:-default}` from the process
+environment. When the configuration text does not live on disk (for example it comes from a config
+center or a database), use `Config.from_yaml_str(yaml_text, DASHSCOPE_API_KEY="sk-...")`. Expansion
+resolution order is **explicit argument > process environment > the `:-` default**; passing `None`
+as an explicit argument behaves like omitting it and falls through to the next source.
+Only single-level placeholders are supported: nesting (for example `${A:-${B}}`), a `}` inside a
+default value, and any escape syntax for a literal `${...}` are all unavailable. Such input raises
+`ValidationError` during parsing instead of silently producing a wrong value.
+`Config.from_dict()` is the pure-data entry point and does not expand anything.
 
 ### 3.2 HTTP, MCP, and Deployment Configuration
 
@@ -167,7 +175,8 @@ memory_api:
 |---|---|
 | `profile` | Service startup profile; not a kernel component namespace |
 | `policies` | Convenience policy configuration passed to `PolicyManager` |
-| `memory_api` | Kernel configuration actually passed to `Config.from_dict()` and `build_kernel()` |
+| `http.dev_identities` | Test identity map read by the HTTP development launcher; not kernel configuration |
+| `memory_api` | Kernel configuration actually passed to `Config.from_dict()` and `assemble()` |
 
 HTTP/MCP startup performs the following steps:
 
@@ -176,11 +185,81 @@ HTTP/MCP startup performs the following steps:
 3. Merge the service-level configuration layers.
 4. Select only the `memory_api` section.
 5. Construct the kernel `Config`.
-6. Call `build_kernel()`.
+6. Call `assemble()`.
 
 Do not pass a complete deployment configuration containing `profile`, `policies`, and
 `memory_api` directly to the kernel `Config`. Fields such as `profile` would be treated as unknown
 Producer namespaces.
+
+### 3.3 HTTP Development Tests: Multiple Identities
+
+By default, `--auth-mode dev` ignores credentials and uses the fixed `local/developer` ROOT identity.
+To test space administration, membership permissions, or multiple users, add the following fragment
+to your own deployment configuration. Keep your existing `memory_api` storage, model, engine, and
+permission settings; a separate test configuration file is not required:
+
+```yaml
+http:
+  dev_identities:
+    test-ops:
+      actor:
+        org: local
+      role: admin
+    test-u1:
+      actor:
+        org: local
+        user: u1
+    test-u2:
+      actor:
+        org: local
+        user: u2
+    test-u1-agent:
+      actor:
+        org: local
+        user: u1
+        agent: a1
+        session: s1
+```
+
+`http` is a sibling of `memory_api`, not a child of `memory_api` or `globals`.
+This fragment only configures test identities; it does not create spaces, add members, or enable routing.
+
+```bash
+bash scripts/run-server.sh --auth-mode dev --host 127.0.0.1 --port 8137 /path/to/config.yml
+```
+
+Use `Authorization: Bearer test-u1` to select user u1, or `X-API-Key: test-u1`.
+A non-empty Bearer value takes precedence when both are present. These values select server-defined
+test identities; they are not production API keys.
+
+| Setting | Constraints |
+|---|---|
+| Map key, such as `test-u1` | Non-empty string without whitespace; chosen by the tester |
+| `actor` | Only `org`, `space`, `user`, `agent`, and `session`; all values must be strings, with a non-blank `org` |
+| `role` | Optional; defaults to `user`; accepts `user`, `admin`, or `root` |
+
+Behavior:
+
+- Read only when HTTP `dev` mode is explicitly enabled; this configuration never changes `required` into dev.
+- Without a map, the fixed identity remains. With a map, missing or unknown selectors return 401,
+  without falling back to `developer`.
+- The map must be a non-empty object, not `{}`, `null`, or a list. Invalid settings fail before binding.
+- Settings are loaded at startup; restart after changes. Under the top-level merge rules in section 9,
+  a later `http` section replaces the earlier section in full.
+- Authentication headers select the identity. Changing `scope.user` in the body does not switch the
+  caller; `scope` remains the business target.
+- `role: admin/root` does not bypass authorization. Existing rules still govern space creation,
+  membership, writes, and reads. The `test-ops` example uses an org-only actor for organization-level
+  space creation; merely changing an ordinary user's role is not sufficient.
+
+The standard HTTP launcher reads this configuration. Local CLI `--auth-mode dev` still uses its
+default fixed identity and does not automatically read `http.dev_identities`. Remote CLI can send
+the matching Bearer selector through `AGENT_MEMORY_API_KEY=test-u1`. Programmatic callers can use
+the public `build_dev_authenticator(identities=...)` helper to construct a test authenticator.
+
+Containers use the same configuration: add this section to the mounted file, keep dev mode
+explicitly enabled, and recreate the application container. Loopback restrictions are unchanged.
+Identity mapping is not production authentication; do not expose it to production or unisolated networks.
 
 ## 4. Basic Configuration Structure
 
@@ -289,7 +368,8 @@ Common namespaces include:
 
 | Category | Namespaces |
 |---|---|
-| Shared components | `tokenizer`, `chunker`, `embedder`, `llm`, `reranker` |
+| Shared components | `tokenizer`, `chunker`, `embedder`, `llm`, `reranker`, `normalizer`, `asr` |
+| Ingest | `ingestor` |
 | Storage | `storage`, `kv_store`, `vector_store`, `fulltext_store`, `graph_store` |
 | Construction | `extractor`, `classifier`, `constructor`, `dedup`, `evolver` |
 | Retrieval | `query_parser`, `recaller`, `fuser`, `discloser`, `retriever` |
@@ -297,6 +377,39 @@ Common namespaces include:
 
 See the API reference for each layer and the registered Producer targets for the available target
 values.
+
+### 4.4 Normalizer Capability Routing
+
+The default assembly uses `normalizer.default=passthrough` and `ingestor.default=simple`. The
+`simple` Ingestor references `normalizer.default` and checks the input modality against
+`Normalizer.modalities()` before normalization.
+
+Multimodal deployments can use the `routing` Normalizer to select an implementation by modality:
+
+```yaml
+normalizer:
+  default:
+    target: routing
+    params:
+      fallback: passthrough
+      routes:
+        video:
+          target: video
+          params:
+            asr_port: video
+            llm_port: video_text
+            vlm_port: video_vision
+```
+
+During assembly, `routing` checks that every route key is included in the target Normalizer's
+`modalities()`. Routing `video` to the text-oriented `passthrough` target therefore makes
+`build_kernel()` raise `ValidationError`. At runtime, input outside the assembled capability set
+raises `UnsupportedCapabilityError` before any MemoryUnit, Storage write, or index write is
+produced. `passthrough` only supports `TEXT` and `CODE` that are already UTF-8 text. CODE input must
+be source text; passthrough does not read source files. Only TEXT retains the compatibility fallback
+that treats `uri` as text when `data` is empty. PDF/Office `DOCUMENT` inputs require a dedicated
+parsing Normalizer. See [`examples/config_multimodal.yml`](../../../examples/config_multimodal.yml)
+for the complete video dependency configuration.
 
 ## 5. Named Instance Structure
 
@@ -485,7 +598,7 @@ instances.
 
 ## 8. Default Configuration and User Overrides
 
-`build_kernel()` first creates the built-in default configuration and then merges user
+`assemble()` first creates the built-in default configuration and then merges user
 configuration over it.
 
 The default configuration is an in-process stack that can run offline:
@@ -672,6 +785,8 @@ The following components are not explicitly overridden and continue to use the d
 
 - `storage.default=composite`
 - `constructor.default=hybrid`
+- `normalizer.default=passthrough`
+- `ingestor.default=simple`
 - `retriever.default=pipeline`
 - `engine.default=in_memory`
 - `scheduler.default=in_process`
@@ -751,7 +866,7 @@ vector_store.uri
 fulltext_store.hosts
 ```
 
-It does not watch the YAML file for changes. After modifying the file, call `build_kernel()` again.
+It does not watch the YAML file for changes. After modifying the file, call `assemble()` again.
 
 ### 12.2 Mutable `dict`
 
@@ -766,14 +881,13 @@ config_source:
         llm.base_url: https://example.com/v1
 ```
 
-After assembly, product-side management code can update the source:
+After assembly, product-side management code can update wired late-bound fields.
+Public `assemble()` / `assemble_runtime()` do not return a `config_source` handle.
+With the `dict` target, the deployer holds the same `DictConfigSource` instance and
+calls `put`, instead of taking a port off Kernel.
 
 ```python
 from jiuwen_memory.config.config_source_impl.dict_config_source import DictConfigSource
-
-source = kernel.config_source
-if not isinstance(source, DictConfigSource):
-    raise TypeError("config_source.default is not the dict target")
 
 source.put("llm.model", "qwen-max")
 source.put("llm.api_key", "new-key")
@@ -845,7 +959,7 @@ as `RoutingEmbedder` or `RoutingStorage`.
 To switch an implementation in ordinary configuration:
 
 1. Change the corresponding `default.target`.
-2. Run `build_kernel()` again.
+2. Run `assemble()` again.
 
 ## 13. Boundary Between PolicyManager and ConfigSource
 
@@ -903,7 +1017,7 @@ referenced by any component is normally not built, so an invalid target or a mis
 dependency in that instance may not surface during startup.
 
 Deployment validation should explicitly call `health()` on assembled components that expose
-health checks. A successful `build_kernel()` call alone does not prove that external services are
+health checks. A successful `assemble()` call alone does not prove that external services are
 available.
 
 ## 15. Recommendations and Common Issues
@@ -914,7 +1028,9 @@ available.
 3. When overriding a named instance, include every `params` dependency that must be preserved.
 4. Put cross-component capability flags in `globals`.
 5. Pass only the `memory_api` section of deployment configuration to the kernel.
-6. Remember that SDK `Config.from_yaml()` does not expand environment variables.
+6. `${VAR}` placeholders are expanded by `Config.from_yaml()` / `Config.from_yaml_str()`;
+   `Config.from_dict()` never expands them, and nesting or a `}` inside a default raises
+   `ValidationError`.
 7. Do not split `memory_api` across multiple deployment files.
 8. Prefer `ConfigSource` for runtime credential or connection-address changes.
 9. Reassemble after changing a target, dependency topology, or instance count.
@@ -968,4 +1084,4 @@ Users must understand that:
 - `ConfigSource` can dynamically change only fields that are already wired for late binding; it
   cannot rebuild the object topology automatically.
 - Factory named-instance caches are process-level class variables. Do not run multiple
-  `build_kernel()` calls concurrently in the same process.
+  `assemble()` calls concurrently in the same process.

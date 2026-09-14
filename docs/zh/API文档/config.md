@@ -1,5 +1,7 @@
 # Config 配置与装配指南
 
+最近一次修订日期：2026-09-09
+
 Agent Memory 的 Config 不只是把 YAML 字段传给某个构造函数，而是一套基于默认拓扑、
 Producer 注册表、具名实例和依赖引用的轻量级装配机制。本指南说明配置如何组织、合并、解析
 和装配，以及哪些字段可以在运行时晚绑定。
@@ -26,8 +28,8 @@ Producer 注册表、具名实例和依赖引用的轻量级装配机制。本�
 
 | 配置类别 | 作用 | 主要生效时机 |
 |---|---|---|
-| 装配拓扑 | 选择组件实现、声明实例、连接组件依赖 | `build_kernel()` |
-| 全局参数 | 向多个组件提供能力开关和公共参数 | 主要在 `build_kernel()` |
+| 装配拓扑 | 选择组件实现、声明实例、连接组件依赖 | `assemble()` |
+| 全局参数 | 向多个组件提供能力开关和公共参数 | 主要在 `assemble()` |
 | `ConfigSource` | 晚绑定模型、凭证、连接地址和 Prompt | 运行时调用阶段 |
 | `PolicyManager` | 管理生命周期、Space 等业务策略 | 运行时 |
 
@@ -66,13 +68,13 @@ constructor:
 
 ## 2. 完整装配链路
 
-SDK 和服务部署最终都会进入 `build_kernel()`：
+SDK 和服务部署最终都会进入 `assemble()`：
 
 ```text
 SDK
   Config.from_dict / Config.from_yaml
                  ┐
-                 ├─> build_kernel
+                 ├─> assemble
                  │     ├─ 注册全部 Producer target
 HTTP / MCP       │     ├─ 清空本次装配的具名实例缓存
   load_layer     │     ├─ default_context + 用户配置覆盖
@@ -103,7 +105,7 @@ HTTP / MCP       │     ├─ 清空本次装配的具名实例缓存
 SDK 可以直接构造内核配置：
 
 ```python
-from jiuwen_memory.api import build_kernel
+from jiuwen_memory.api import assemble
 from jiuwen_memory.config import Config
 
 config = Config.from_dict(
@@ -123,19 +125,23 @@ config = Config.from_dict(
     }
 )
 
-kernel = build_kernel(config=config)
-memory_api = kernel.api
+api = assemble(config=config)
 ```
 
 也可以从只包含内核配置的 YAML 文件读取：
 
 ```python
 config = Config.from_yaml("./memory-config.yml")
-kernel = build_kernel(config=config)
+api = assemble(config=config)
 ```
 
-`Config.from_yaml()` 只负责解析 YAML，不会展开 `${ENV_VAR}`。SDK 场景需要调用方自行读取
-环境变量，或提前构造配置字典。
+`Config.from_yaml()` 解析 YAML，并把字符串里的 `${ENV_VAR}` / `${ENV_VAR:-默认值}` 按进程环境
+变量展开。若配置文本不在磁盘上（例如从配置中心或数据库取出），可用
+`Config.from_yaml_str(yaml_text, DASHSCOPE_API_KEY="sk-...")`：展开优先级为**显式传参 >
+环境变量 > `${VAR:-默认值}` 里的默认值**；传 `None` 等同没传，会继续向后回落。
+只支持单层占位符：不支持嵌套写法（如 `${A:-${B}}`），默认值里不能出现 `}`，也没有产出字面
+`${...}` 的转义写法——这类输入会在解析阶段抛 `ValidationError`，而不是静默给出错误的值。
+`Config.from_dict()` 是纯数据入口，不做任何展开。
 
 ### 3.2 HTTP、MCP 和部署配置
 
@@ -163,7 +169,8 @@ memory_api:
 |---|---|
 | `profile` | 服务启动 profile，不属于内核组件命名空间 |
 | `policies` | 传给 `PolicyManager` 的便捷策略配置 |
-| `memory_api` | 真正传入 `Config.from_dict()` 和 `build_kernel()` 的内核配置 |
+| `http.dev_identities` | HTTP 开发模式的测试身份映射，由 HTTP 启动器读取，不属于内核配置 |
+| `memory_api` | 真正传入 `Config.from_dict()` 和 `assemble()` 的内核配置 |
 
 HTTP/MCP 启动过程会：
 
@@ -172,10 +179,73 @@ HTTP/MCP 启动过程会：
 3. 合并服务配置层；
 4. 只取 `memory_api` 段；
 5. 构造内核 `Config`；
-6. 调用 `build_kernel()`。
+6. 调用 `assemble()`。
 
 不能把包含 `profile`、`policies` 和 `memory_api` 的完整部署配置直接传给内核 `Config`，
 否则 `profile` 等字段会被当成未知 Producer 命名空间。
+
+### 3.3 HTTP 开发测试：配置多个身份
+
+默认 `--auth-mode dev` 忽略凭据，使用固定的 `local/developer` ROOT 身份。
+测试空间管理、成员权限或多个用户时，可以在自己的部署配置文件中增加以下片段，
+保留原来的 `memory_api` 存储、模型、引擎及权限配置，不需要额外创建专用配置文件：
+
+```yaml
+http:
+  dev_identities:
+    test-ops:
+      actor:
+        org: local
+      role: admin
+    test-u1:
+      actor:
+        org: local
+        user: u1
+    test-u2:
+      actor:
+        org: local
+        user: u2
+    test-u1-agent:
+      actor:
+        org: local
+        user: u1
+        agent: a1
+        session: s1
+```
+
+`http` 与 `memory_api` 同级，不能放进 `memory_api` 或 `globals`。
+上面只是测试身份配置，不会自动创建空间、添加成员或启用归属判定。
+
+```bash
+bash scripts/run-server.sh --auth-mode dev --host 127.0.0.1 --port 8137 /path/to/config.yml
+```
+
+请求头 `Authorization: Bearer test-u1` 选择用户 u1；也支持 `X-API-Key: test-u1`。
+两者都提供时优先使用非空 Bearer 值。标识只是服务端预设身份的选择键，不是生产 API Key。
+
+| 配置项 | 约束 |
+|---|---|
+| 映射键，如 `test-u1` | 非空字符串，不含空白；由测试方自行命名 |
+| `actor` | 仅允许 `org`、`space`、`user`、`agent`、`session`；值必须是字符串，`org` 不能为空白 |
+| `role` | 可选，默认为 `user`；可取 `user`、`admin`、`root` |
+
+生效规则：
+
+- 仅显式启用 HTTP `dev` 模式时读取；`required` 模式不会因存在此配置而切换为 dev。
+- 未配置映射时保持固定身份；配置后必须携带有效标识，缺失或未知标识返回 401，不回退到 `developer`。
+- 映射必须是非空对象，不能是 `{}`、`null` 或列表；非法配置在启动监听前报错。
+- 配置在启动时加载，修改后需要重启；多配置文件的顶层合并规则见第 9 节，后一个 `http` 段整体覆盖前一个。
+- 身份由认证头选择，修改请求体 `scope.user` 不能切换身份；`scope` 仍是业务目标。
+- `role: admin/root` 不等于绕过权限。空间创建、成员管理、写入和检索仍由原有授权规则决定；
+  测试组织级创建空间时，示例 `test-ops` 使用仅含 `org` 的主体，不能只给普通用户改一个 role。
+
+HTTP 标准启动器负责读取该配置；本地 CLI 的 `--auth-mode dev` 仍使用默认固定身份，
+不会自动读取 `http.dev_identities`。远程 CLI 可通过 `AGENT_MEMORY_API_KEY=test-u1`
+向 HTTP 服务发送对应 Bearer 标识。程序化接入可用公开
+`build_dev_authenticator(identities=...)` 构造测试认证器。
+
+容器内使用相同配置：将此段加入实际挂载的配置文件，保持显式 dev 开关并重建应用容器。
+默认回环限制保持不变；多身份映射不增加生产认证能力，不得用于生产或未隔离的共享网络。
 
 ## 4. 配置基本结构
 
@@ -281,13 +351,44 @@ constructor:
 
 | 分类 | 命名空间 |
 |---|---|
-| 共享组件 | `tokenizer`、`chunker`、`embedder`、`llm`、`reranker` |
+| 共享组件 | `tokenizer`、`chunker`、`embedder`、`llm`、`reranker`、`normalizer`、`asr` |
+| Ingest | `ingestor` |
 | Storage | `storage`、`kv_store`、`vector_store`、`fulltext_store`、`graph_store` |
 | Construction | `extractor`、`classifier`、`constructor`、`dedup`、`evolver` |
 | Retrieval | `query_parser`、`recaller`、`fuser`、`discloser`、`retriever` |
 | Control | `engine`、`scheduler`、`permission`、`policy`、`lifecycle` |
 
 具体可选 target 以各层 API 文档和 Producer 注册结果为准。
+
+### 4.4 Normalizer 能力路由
+
+默认装配为 `normalizer.default=passthrough`、`ingestor.default=simple`。`simple` Ingestor
+引用 `normalizer.default`，并在规约前以 `Normalizer.modalities()` 校验输入模态。
+
+多模态场景可用 `routing` Normalizer 按模态选择实现：
+
+```yaml
+normalizer:
+  default:
+    target: routing
+    params:
+      fallback: passthrough
+      routes:
+        video:
+          target: video
+          params:
+            asr_port: video
+            llm_port: video_text
+            vlm_port: video_vision
+```
+
+`routing` 在装配时检查每个 route key 是否包含在目标 Normalizer 的 `modalities()` 中；
+例如把 `video` 路由到只支持文本化模态的 `passthrough` 会使 `build_kernel()` 抛出
+`ValidationError`。运行时输入不属于已装配能力集合时抛出 `UnsupportedCapabilityError`，
+且不会进入 MemoryUnit、Storage 或索引写入。`passthrough` 当前只支持已经是 UTF-8 文本的
+`TEXT` 和 `CODE`：CODE 输入必须是源码文本，不读取源码文件；只有 TEXT 保留无 data 时的
+URI 兼容回退。PDF/Office 等 `DOCUMENT` 原件需要专用解析型 Normalizer。完整视频依赖配置见
+[`examples/config_multimodal.yml`](../../../examples/config_multimodal.yml)。
 
 ## 5. 具名实例结构
 
@@ -470,7 +571,7 @@ llm:
 
 ## 8. 默认配置与用户覆盖
 
-`build_kernel()` 首先创建内置默认配置，再合并用户配置。
+`assemble()` 首先创建内置默认配置，再合并用户配置。
 
 默认配置是一套可离线运行的进程内组合：
 
@@ -651,6 +752,8 @@ memory_api:
 
 - `storage.default=composite`；
 - `constructor.default=hybrid`；
+- `normalizer.default=passthrough`；
+- `ingestor.default=simple`；
 - `retriever.default=pipeline`；
 - `engine.default=in_memory`；
 - `scheduler.default=in_process`。
@@ -727,7 +830,7 @@ vector_store.uri
 fulltext_store.hosts
 ```
 
-它不会监听 YAML 文件变化。修改文件后必须重新执行 `build_kernel()`。
+它不会监听 YAML 文件变化。修改文件后必须重新执行 `assemble()`。
 
 ### 12.2 可变 `dict`
 
@@ -742,14 +845,12 @@ config_source:
         llm.base_url: https://example.com/v1
 ```
 
-装配后，产品侧可以更新：
+装配后，产品侧可以更新已接线的晚绑定字段。公开 `assemble()` / `assemble_runtime()`
+不返回 `config_source` 句柄；使用 `dict` target 时，由部署方持有同一
+`DictConfigSource` 实例并调用 `put`，而不是从 Kernel 上取端口。
 
 ```python
 from jiuwen_memory.config.config_source_impl.dict_config_source import DictConfigSource
-
-source = kernel.config_source
-if not isinstance(source, DictConfigSource):
-    raise TypeError("config_source.default 不是 dict target")
 
 source.put("llm.model", "qwen-max")
 source.put("llm.api_key", "new-key")
@@ -817,7 +918,7 @@ Recaller/IndexBuilder。此类变更需要重新装配。
 普通配置中切换实现仍应：
 
 1. 修改对应 `default.target`；
-2. 重新执行 `build_kernel()`。
+2. 重新执行 `assemble()`。
 
 ## 13. PolicyManager 与 ConfigSource 的边界
 
@@ -873,7 +974,7 @@ Reranker。当前实现中，运行时修改 `rerank.enabled` 不会自动重建
 target 或缺失后端依赖可能不会在启动阶段暴露。
 
 部署验收时应对已装配且对外暴露探活能力的组件显式执行 `health()`，
-不能仅以 `build_kernel()` 成功作为外部服务可用的证明。
+不能仅以 `assemble()` 成功作为外部服务可用的证明。
 
 ## 15. 使用建议与常见问题
 
@@ -882,7 +983,8 @@ target 或缺失后端依赖可能不会在启动阶段暴露。
 3. 覆盖同名实例时写全仍需保留的 `params` 依赖；
 4. 跨组件能力开关优先放在 `globals`；
 5. 部署配置只把 `memory_api` 段传给内核；
-6. SDK 的 `Config.from_yaml()` 不会展开环境变量；
+6. `${VAR}` 占位符只在 `Config.from_yaml()` / `Config.from_yaml_str()` 展开，`Config.from_dict()` 不展开；
+   嵌套占位符与含 `}` 的默认值会抛 `ValidationError`；
 7. 多个部署文件之间不要拆分 `memory_api`；
 8. 运行时切换凭证或连接地址优先使用 `ConfigSource`；
 9. 修改 target、依赖拓扑或实例数量后重新装配；
@@ -934,4 +1036,4 @@ globals:
 - 字符串既可能是普通值，也可能是实例引用；
 - 一部分错误只能在递归装配或首次连接时发现；
 - `ConfigSource` 只能动态修改已接线字段，不能自动重建对象拓扑；
-- Factory 具名缓存是进程级类变量，同一进程内不适合并发执行多个 `build_kernel()`。
+- Factory 具名缓存是进程级类变量，同一进程内不适合并发执行多个 `assemble()`。

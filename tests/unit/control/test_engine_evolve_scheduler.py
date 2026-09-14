@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-from jiuwen_memory.api.memory_api_impl import build_kernel
+from jiuwen_memory.api.memory_api_impl.assembly import _build_kernel as build_kernel
 from jiuwen_memory.common.security.legacy import legacy_request_context
 from jiuwen_memory.common.type_def import Scope
 from jiuwen_memory.config.config import Config
@@ -13,7 +13,6 @@ from jiuwen_memory.control.jobs import Job, JobFactory, JobType
 from jiuwen_memory.control.jobs_impl.evolve_job import EvolveJobSpec
 from jiuwen_memory.control.types import BatchWriteItem, Channel, JobStatus
 from jiuwen_memory.storage.kv_impl.in_memory_kv_store import InMemoryKVStore
-from jiuwen_memory.storage.storage_impl.composite_storage import CompositeStorage
 
 _TEST_KEY_HEX = "00" * 32
 
@@ -57,7 +56,7 @@ def _build_test_job_factory(evolver) -> JobFactory:
     factory = JobFactory()
     factory.register(
         JobType.EVOLVE,
-        EvolveJobSpec(storage=CompositeStorage(kv=InMemoryKVStore()), evolver=evolver).with_scope,
+        EvolveJobSpec(kv=InMemoryKVStore(), evolver=evolver).with_scope,
     )
     return factory
 
@@ -71,7 +70,7 @@ def test_engine_evolve_only_submits_scheduler_job() -> None:
         ingestor=None,
         index_builder=None,
         retriever=None,
-        storage=CompositeStorage(kv=InMemoryKVStore()),
+        kv=InMemoryKVStore(),
         scheduler=scheduler,
         evolver=evolver,
         lifecycle=None,
@@ -96,7 +95,7 @@ def test_in_memory_batch_write_collects_unexpected_error_and_continues() -> None
         ingestor=None,
         index_builder=None,
         retriever=None,
-        storage=CompositeStorage(kv=InMemoryKVStore()),
+        kv=InMemoryKVStore(),
         scheduler=None,
         evolver=None,
         lifecycle=None,

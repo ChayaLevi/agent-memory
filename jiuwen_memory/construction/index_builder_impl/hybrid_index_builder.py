@@ -23,7 +23,11 @@ from jiuwen_memory.common.log import get_logger
 from jiuwen_memory.common.type_def import MemoryUnit, Scope
 from jiuwen_memory.construction.base import OperatorType
 from jiuwen_memory.construction.index_builder import IndexBuilder, IndexBuilderProducer
-from jiuwen_memory.storage.storage import Storage, StorageProducer
+from jiuwen_memory.storage.store_manager import (
+    StoreManager,
+    StoreManagerProducer,
+    resolve_name,
+)
 from jiuwen_memory.storage.types import IndexRemoveMode, IndexWriteMode
 
 from .entity_index_builder import EntityIndexAdmissionPolicy, EntityIndexBuilder, EntityLinkService
@@ -43,23 +47,30 @@ class HybridIndexBuilder(IndexBuilder):
 
     def __init__(
         self,
-        storage: Storage,
+        storage: StoreManager,
         chunker: Chunker,
         embedder: Embedder,
         *,
+        kv_name: str = "default",
+        fulltext_name: str = "default",
+        vector_name: str = "default",
         layers_enabled: bool = True,
         entity_linker: EntityLinkService | None = None,
     ) -> None:
-        # 各子 builder 的 Store 端口都从这一个 storage 取，保证读写同源。
-        self._forward_builder = ForwardIndexBuilder(storage)
+        # 各子 builder 的 Store 端口都从这一个 storage 取，保证读写同源；name 键
+        # 透传（各子 builder 独立生效）。
+        self._forward_builder = ForwardIndexBuilder(storage, kv_name=kv_name)
         self._fulltext_builder = FulltextIndexBuilder(
             storage,
+            fulltext_name=fulltext_name,
             layers_enabled=layers_enabled,
         )
         self._vector_builder = VectorIndexBuilder(
             storage,
             chunker,
             embedder,
+            vector_name=vector_name,
+            kv_name=kv_name,
             layers_enabled=layers_enabled,
         )
         # entity 子 builder：None 表示不建实体索引（entity_enabled=False 或未注入 linker）
@@ -147,32 +158,32 @@ class HybridIndexBuilder(IndexBuilder):
 @IndexBuilderProducer.register("hybrid")
 def _build(config):
 
+    manager = StoreManagerProducer.resolve(config)
 
-    # entity_linker 注入：entity_enabled 默认 False（需显式开启 + EntityStore 后端
-    # 可解析）
     entity_linker = None
     if config.get("entity_enabled", False):
-        try:
-            from jiuwen_memory.storage.entity_store import EntityStoreProducer
-
-            entity_store = EntityStoreProducer.dep(config, default="elasticsearch")
-            if entity_store is not None:
-                entity_linker = EntityLinkService(
-                    entity_store=entity_store,
-                    admission_policy=EntityIndexAdmissionPolicy(),
-                )
-        except Exception as exc:
-            logger.warning(
-                "EntityStore 装配失败, entity 链路降级关闭(fulltext+vector 继续工作): %s",
-                exc,
-                exc_info=True,
+        entity_name = resolve_name(config, "entity_store")
+        if manager.has_entity(entity_name):
+            entity_embedder = EmbedderProducer.dep(config, default="hashing")
+            entity_linker = EntityLinkService(
+                entity_store=manager.entity(entity_name),
+                embedder=entity_embedder,
+                admission_policy=EntityIndexAdmissionPolicy(),
+                semantic_match_threshold=config.get("entity_semantic_match_threshold", 0.95),
             )
-            entity_linker = None
-
+        else:
+            logger.warning(
+                "entity_enabled=true 但 manager 未装配 entity 端口 %r，"
+                "entity 链路降级关闭（fulltext+vector 继续工作）",
+                entity_name,
+            )
     return HybridIndexBuilder(
-        StorageProducer.resolve(config),
+        manager,
         ChunkerProducer.dep(config, default="fixed_window"),
         EmbedderProducer.dep(config, default="hashing"),
+        kv_name=resolve_name(config, "kv_store"),
+        fulltext_name=resolve_name(config, "fulltext_store"),
+        vector_name=resolve_name(config, "vector_store"),
         layers_enabled=config.get("layers_index_enabled", True),
         entity_linker=entity_linker,
     )

@@ -18,13 +18,16 @@ import asyncio
 import pytest
 
 from jiuwen_memory.common.base import PluginType
-from jiuwen_memory.common.llm.base import LLM
 from jiuwen_memory.common.errors import ValidationError
+from jiuwen_memory.common.llm.base import LLM
 from jiuwen_memory.common.type_def import (
     LifecycleState,
     MemoryTier,
     MemoryUnit,
+    Modality,
+    RawPayload,
     Scope,
+    Segment,
     memory_key,
 )
 from jiuwen_memory.common.type_def.chat import ChatMessage
@@ -36,10 +39,11 @@ from jiuwen_memory.control.base import ControlOperatorType
 from jiuwen_memory.control.engine_impl.in_memory_engine import InMemoryEngine
 from jiuwen_memory.control.jobs import Job, JobFactory, JobType
 from jiuwen_memory.control.jobs_impl.middle_to_long_job import MiddleToLongJobSpec
-from jiuwen_memory.control.lifecycle import LifecycleManager
+from jiuwen_memory.control.lifecycle import LifecycleManager, SweepTransition
 from jiuwen_memory.control.types import Channel, JobStatus
+from jiuwen_memory.ingest.base import IngestOperatorType
+from jiuwen_memory.ingest.ingestor import Ingestor
 from jiuwen_memory.storage.kv_impl.in_memory_kv_store import InMemoryKVStore
-from jiuwen_memory.storage.storage_impl.composite_storage import CompositeStorage
 from jiuwen_memory.storage.types import IndexRemoveMode, IndexWriteMode
 
 pytestmark = pytest.mark.unit
@@ -57,6 +61,10 @@ class _RecordingScheduler:
 
     def __init__(self) -> None:
         self.calls: list[tuple[Job, Channel]] = []
+        self.validated: list[Job] = []
+
+    def validate(self, job: Job) -> None:
+        self.validated.append(job)
 
     async def submit(self, job: Job, channel: Channel) -> str:
         self.calls.append((job, channel))
@@ -87,15 +95,16 @@ class _NoopEvolver(Evolver):
 
 
 class _RecordingIndex(IndexBuilder):
-    """记录 build 入参的 IndexBuilder 替身，并交付 Storage。
+    """记录 build 入参的 IndexBuilder 替身，并交付真源。
 
-    IndexBuilder 是记忆写入的唯一入口，替身必须交付 Storage，否则真源为空。
+    IndexBuilder 是记忆写入的唯一入口，替身必须交付真源，否则 KV 为空。
+    交付走 KV 直写（``memory_key`` + ``dumps``，ForwardIndexBuilder 模式）。
     """
 
-    def __init__(self, storage=None) -> None:
+    def __init__(self, kv=None) -> None:
         self.built: list[MemoryUnit] = []
         self.removed: list[MemoryUnit] = []
-        self._storage = storage
+        self._kv = kv
 
     def operator_type(self) -> OperatorType:
         return OperatorType.INDEX_BUILDER
@@ -105,20 +114,51 @@ class _RecordingIndex(IndexBuilder):
 
     def build(self, units, *, mode: IndexWriteMode = IndexWriteMode.ALL) -> None:
         self.built.extend(units)
-        if self._storage is not None:
+        if self._kv is not None:
             for unit in units:
-                self._storage.add(unit.scope, [unit])
+                self._kv.insert(unit.scope, memory_key(unit.id), dumps(unit))
 
     def update(self, units, *, mode: IndexWriteMode = IndexWriteMode.ALL) -> None:
-        if self._storage is not None:
+        if self._kv is not None:
             for unit in units:
-                self._storage.update(unit.scope, [unit])
+                self._kv.update(unit.scope, memory_key(unit.id), dumps(unit))
 
     def remove(self, units, *, mode: IndexRemoveMode = IndexRemoveMode.HARD) -> None:
         self.removed.extend(units)
 
     def rebuild(self) -> None:
         return None
+
+
+class _AssetRoutingIngestor(Ingestor):
+    """把资产映射到第二个 Segment，用于验证 Engine 不解释映射关系。"""
+
+    def __init__(self) -> None:
+        self.received_assets: list[list[str]] = []
+
+    @staticmethod
+    def operator_type() -> IngestOperatorType:
+        return IngestOperatorType.INGESTOR
+
+    @staticmethod
+    def health() -> None:
+        return None
+
+    def ingest(self, payloads: list[RawPayload]) -> list[MemoryUnit]:
+        self.received_assets.extend(list(payload.assets) for payload in payloads)
+        return [
+            MemoryUnit(
+                id=payload.id,
+                scope=payload.scope,
+                segments=[
+                    Segment(content=payload.data.decode("utf-8"), source=payload.modality),
+                    Segment(assets=list(payload.assets), source=payload.modality),
+                ],
+                system_metadata=dict(payload.system_metadata),
+                user_metadata=dict(payload.user_metadata),
+            )
+            for payload in payloads
+        ]
 
 
 class _NoopLifecycle(LifecycleManager):
@@ -134,7 +174,7 @@ class _NoopLifecycle(LifecycleManager):
     def supersede(self, scope, unit_id, invalid_at):
         raise AssertionError("middle path should not call supersede")
 
-    def sweep(self) -> list[str]:
+    def sweep(self) -> list[SweepTransition]:
         return []
 
 
@@ -183,8 +223,7 @@ def _build_engine(
     from jiuwen_memory.ingest.ingestor_impl.simple_ingestor import SimpleIngestor
 
     kv = InMemoryKVStore()
-    storage = CompositeStorage(kv=kv)
-    index = _RecordingIndex(storage)
+    index = _RecordingIndex(kv)
     scheduler = scheduler or _RecordingScheduler()
     evolver = evolver or _NoopEvolver()
     lifecycle = _NoopLifecycle()
@@ -199,7 +238,7 @@ def _build_engine(
     factory.register(
         JobType.MIDDLE_TO_LONG,
         MiddleToLongJobSpec(
-            storage=storage,
+            kv=kv,
             evolver=evolver,
             lifecycle=lifecycle,
             index=index,
@@ -210,12 +249,13 @@ def _build_engine(
         ).with_scope,
     )
 
-    # 本测试聚焦 write middle 路径——不依赖 retriever。Retriever 用 None（write 路径不调 retriever）。
+    # 本测试聚焦 write middle 路径，不依赖 retriever。
+    # Retriever 用 None（write 路径不调 retriever）。
     engine = InMemoryEngine(
         ingestor=ingestor,
         index_builder=index,
         retriever=None,
-        storage=storage,
+        kv=kv,
         scheduler=scheduler,
         evolver=evolver,
         lifecycle=lifecycle,
@@ -226,7 +266,39 @@ def _build_engine(
     return engine, scheduler, index, kv
 
 
+def _build_assets_engine(ingestor: Ingestor) -> InMemoryEngine:
+    kv = InMemoryKVStore()
+    return InMemoryEngine(
+        ingestor=ingestor,
+        index_builder=_RecordingIndex(kv),
+        retriever=None,
+        kv=kv,
+        scheduler=_RecordingScheduler(),
+        evolver=_NoopEvolver(),
+        lifecycle=_NoopLifecycle(),
+    )
+
+
 # ---- 路径选择 ----
+
+
+def test_write_delegates_assets_mapping_to_ingestor() -> None:
+    ingestor = _AssetRoutingIngestor()
+    engine = _build_assets_engine(ingestor)
+    assets = ["file:///video.mp4", "file:///transcript.json"]
+
+    units = asyncio.run(
+        engine.write(
+            "normalized content",
+            Scope(org="acme", user="alice"),
+            source=Modality.TEXT,
+            assets=assets,
+        )
+    )
+
+    assert ingestor.received_assets == [assets]
+    assert units[0].segments[0].assets == []
+    assert units[0].segments[1].assets == assets
 
 
 def test_write_procedural_takes_precedence_over_middle() -> None:
@@ -425,6 +497,96 @@ def test_write_middle_raises_when_evolver_is_none() -> None:
         asyncio.run(
             engine.write("x", scope, system_metadata={"infer": "true", "middle": "true"})
         )
+
+
+# ---- 落盘前拦截：scheduler.validate 拒绝时无 KV/索引残留 ----
+
+
+def test_write_middle_interval_below_tick_raises_before_persist() -> None:
+    """middle_interval < tick_interval → write 抛 ValueError 且原文未落盘。
+
+    校验经 ``scheduler.validate`` 在 ``index_builder.build`` 之前调用——
+    消除「submit 拒绝但原文已落 KV + 建索引」的残留窗口。
+    """
+    from jiuwen_memory.control.scheduler_impl.async_timer_scheduler import (
+        AsyncTimerScheduler,
+    )
+
+    scheduler = AsyncTimerScheduler(tick_interval=60)
+    engine, _, index, kv = _build_engine(scheduler=scheduler)
+    scope = Scope(org="acme", user="u1")
+
+    with pytest.raises(ValueError, match="tick_interval"):
+        asyncio.run(
+            engine.write(
+                "alice likes tea",
+                scope,
+                system_metadata={
+                    "infer": "true",
+                    "middle": "true",
+                    "middle_interval": "5",  # 5 < 60
+                },
+            )
+        )
+
+    # 无残留：原文未写 KV、未建索引
+    assert index.built == []
+    assert kv.list(scope, limit=100).entries == []
+
+
+def test_write_middle_spec_default_interval_below_tick_raises_before_persist() -> None:
+    """middle_interval 缺省（Spec 装配期默认 50）+ tick_interval 更大 → 同样落盘前拦截。
+
+    ``get_job`` 先于 ``validate`` 执行——None 已解析为 Spec 默认值，
+    装配期配置错误在首次 write 时即 fail fast，而非残留后靠 submit 拒绝。
+    """
+    from jiuwen_memory.control.scheduler_impl.async_timer_scheduler import (
+        AsyncTimerScheduler,
+    )
+
+    scheduler = AsyncTimerScheduler(tick_interval=60)
+    engine, _, index, kv = _build_engine(scheduler=scheduler)
+    scope = Scope(org="acme", user="u1")
+
+    with pytest.raises(ValueError, match="tick_interval"):
+        asyncio.run(
+            engine.write(
+                "alice likes tea",
+                scope,
+                system_metadata={"infer": "true", "middle": "true"},
+            )
+        )
+
+    assert index.built == []
+    assert kv.list(scope, limit=100).entries == []
+
+
+def test_write_middle_interval_above_tick_persists_and_submits() -> None:
+    """middle_interval >= tick_interval → 正常落盘 + submit（防回归）。"""
+    from jiuwen_memory.control.scheduler_impl.async_timer_scheduler import (
+        AsyncTimerScheduler,
+    )
+
+    scheduler = AsyncTimerScheduler(tick_interval=10)
+    engine, _, index, kv = _build_engine(scheduler=scheduler)
+    scope = Scope(org="acme", user="u1")
+
+    units = asyncio.run(
+        engine.write(
+            "alice likes tea",
+            scope,
+            system_metadata={
+                "infer": "true",
+                "middle": "true",
+                "middle_interval": "20",  # 20 >= 10
+            },
+        )
+    )
+
+    assert len(units) >= 1
+    persisted = loads(kv.get(scope, memory_key(units[0].id)))
+    assert persisted.tier == MemoryTier.WORKING
+    assert index.built == units
 
 
 # ---- 多次 write 重复提交（验证同 scope 同 kind 复用 entry） ----

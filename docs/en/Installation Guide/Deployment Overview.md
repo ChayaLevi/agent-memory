@@ -1,5 +1,7 @@
 # Deployment Overview
 
+Last revised: 2026-09-09
+
 This document helps users choose how to run agent-memory before proceeding to detailed installation
 instructions. The project currently supports two broad deployment categories: **containerized
 deployment** and **SDK deployment**.
@@ -47,8 +49,7 @@ process.
 
 > `jiuwen_memory_entry/sdk` does not yet provide a separately packaged SDK client or launcher. In this
 > documentation, "SDK deployment" is the general term for direct Python package integration. The
-> stable entry points are the `Kernel` and `MemoryAPI` returned by
-> `jiuwen_memory.api.build_kernel()`.
+> stable entry point is the `MemoryAPI` returned by `jiuwen_memory.api.assemble()`.
 
 This mode has two independent selection dimensions:
 
@@ -75,7 +76,7 @@ See [SDK Deployment](<SDK Deployment.md>) for detailed instructions.
 
 ### 3.1 Default In-Memory Stack
 
-When `build_kernel()` is called without a configuration, the system uses its built-in offline
+When `assemble()` is called without a configuration, the system uses its built-in offline
 configuration:
 
 - `CompositeStorage` exposes the unified Storage interface;
@@ -87,37 +88,65 @@ configuration:
 This mode is suitable for feature development and testing. It should not be treated as a persistent
 deployment.
 
-### 3.2 HTTP and MemoryAPI Are Not Fully Equivalent
+### 3.2 HTTP and MemoryAPI Are Aligned One to One
 
-The local HTTP service is a JSON adapter over `MemoryAPI`. It covers common write, retrieval,
-governance, permission, and space-management operations, but it is not a complete one-to-one
-mapping. For example:
+The local HTTP service is a JSON adapter over `MemoryAPI` and exposes all 36 methods. Each method
+uses `POST /v1/<method_name>`. Request field names, nesting, required fields, and defaults match the
+same-named `MemoryAPI` method. A successful response directly serializes the original return value
+without introducing another business envelope or task model.
 
-- HTTP does not expose `job_cancel` or `check_write` as standalone routes;
-- `add_async` and `batch_add_async` do not have independent HTTP routes;
-- HTTP `search` always uses L2 disclosure and does not expose every parameter, such as `as_of`;
-- HTTP `update` and `delete` expose only commonly used subsets of the underlying API parameters;
-- the target scope of ordinary HTTP requests primarily maps to `org + space + user`; the complete
-  five-dimensional scope appears only in some request structures.
+The HTTP boundary performs only the conversions required by JSON:
 
-Use direct Python calls when you need the full `MemoryAPI` parameter set, asynchronous methods, or
-fine-grained governance capabilities. HTTP is better suited to cross-language integration and common
-feature testing.
+- Python objects such as `Scope`, `Context`, and `MemoryPatch` use equivalent JSON objects, while
+  enum and datetime values use strings and ISO 8601 strings respectively;
+- `security` cannot be supplied in the request body. The authentication boundary constructs and
+  injects it from the runtime's authentication result. Dev mode uses a minimal
+  `DevHttpSecurityRuntime`, not a fully configured production security runtime.
+
+Synchronous methods run directly in the request thread. For asynchronous methods, the HTTP entry
+point waits for the same-named async method and returns its original result instead of creating a
+background job. Direct Python calls are generally chosen for in-process latency, static typing, and
+Python objects, not missing ordinary HTTP methods. The four add methods (`add`, `add_async`,
+`batch_add`, and `batch_add_async`) also support request-level `system_metadata.coords` objects,
+validated separately as string key-value pairs. Individual batch items cannot carry this key.
+Routing still requires kernel router, space, and permission configuration; see
+[SDK Deployment](<SDK Deployment.md#write-routing-coordinates-coords>).
 
 ### 3.3 Security Boundary of the Current HTTP Service
 
 The repository provides a reference service based on Python's standard-library
-`ThreadingHTTPServer`. It does not currently include transport authentication, TLS, rate limiting,
-or multi-process management. Actor fields in requests are caller-provided claims and are not a
-substitute for real identity authentication.
+`ThreadingHTTPServer`. It does not include TLS or multi-process management. Business requests must
+first establish a trusted `RequestSecurityContext`, and the service rejects `security`, `actor_*`,
+`identity`, and similar identity claims in the request body. In the default `required` mode, a
+missing production runtime makes business endpoints return 503 instead of trusting a payload
+identity. Local functional tests may explicitly enable `dev`. Without an identity map it ignores
+authentication headers and uses the fixed `local/developer` ROOT identity. With
+[`http.dev_identities`](<../API Docs/config.md#33-http-development-tests-multiple-identities>),
+Bearer or X-API-Key test selectors choose server-defined identities; missing or unknown selectors
+return 401. Both modes run MemoryAPI authorization and reject payload-provided identity claims.
 
-Bind the service to `127.0.0.1` in development. Before exposing it to a shared network or production,
-add TLS, authentication, access control, rate limiting, and auditing at a gateway, and use a process
-and availability management solution appropriate for production.
+The standard `HttpServer.serve()` entry point checks the binding before creating the socket.
+Dev mode allows only loopback hosts by default, such as `127.0.0.1`, `::1`, and `localhost`.
+Reusing `handler_cls()` in a separately constructed server does not perform this check;
+the embedding application must enforce its own binding policy.
+Listening on `0.0.0.0` inside Docker also requires
+`JIUWEN_MEMORY_HTTP_ALLOW_DEV_AUTH_NON_LOOPBACK=true`. The supplied Compose files set this flag
+and publish the host port only on `127.0.0.1` by default. Before exposing the service to a shared network or production,
+return to `required`, provide a production-grade authentication runtime, add TLS, access control,
+and traffic protection at a gateway, and use appropriate process and availability management.
+
+> **Dangerous override:** `JIUWEN_MEMORY_HTTP_ALLOW_DEV_AUTH_NON_LOOPBACK=true` relaxes the
+> dev binding restriction; it does not add production authentication. Without a map, anyone who
+> connects uses the default test identity. With a map, holders of test selectors can choose the
+> configured identities, subject to API authorization. Restrict published ports, container networks,
+> and proxies. Neither a startup warning nor test identity mapping replaces production security.
 
 ## 4. Access Methods That Are Not Separate Deployment Options
 
-- **CLI**: can call the kernel in process or access an HTTP service; it is a client entry point.
+- **CLI**: exposes all 36 API methods as same-named commands with matching parameter names and JSON
+  structures. Local mode calls the API directly; `--server` sends the same payload over HTTP without
+  legacy request/response conversion. Local tests require explicit `--auth-mode dev`; remote
+  authentication is controlled by the server. See the [CLI guide](../../../jiuwen_memory_entry/cli/DESIGN.md).
 - **MCP**: can expose tools over stdio or streamable HTTP; it is a protocol surface whose underlying
   deployment must still choose between memory and real storage.
 - **`jiuwen_memory_entry/sdk`**: currently contains only a package skeleton and is not a separate SDK product

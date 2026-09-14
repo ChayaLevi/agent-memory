@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from jiuwen_memory.api.memory_api_impl import build_kernel
+from jiuwen_memory.api import assemble
 from jiuwen_memory.common.errors import PermissionDeniedError, ValidationError
 from jiuwen_memory.common.security.legacy import legacy_request_context
 from jiuwen_memory.common.type_def import (
@@ -16,6 +16,7 @@ from jiuwen_memory.common.type_def import (
 )
 from jiuwen_memory.common.type_def.memory_codec import dumps
 from jiuwen_memory.config import Config
+from jiuwen_memory.storage.kv_impl.in_memory_kv_store import InMemoryKVStore
 
 pytestmark = pytest.mark.unit
 
@@ -40,7 +41,7 @@ def _routing_config() -> Config:
 
 
 def test_memory_api_list_supports_pagination_and_memory_type_filter() -> None:
-    api = build_kernel().api
+    api = assemble()
     scope = Scope(org="acme", user="owner")
 
     episodic = api.add(
@@ -75,8 +76,8 @@ def test_memory_api_list_supports_pagination_and_memory_type_filter() -> None:
 
 
 def test_memory_api_list_is_scope_bound_and_ignores_message_prefix_records() -> None:
-    kernel = build_kernel()
-    api = kernel.api
+    kv = InMemoryKVStore()
+    api = assemble(kv=kv)
     owner = Scope(org="acme", user="owner")
     other = Scope(org="acme", user="other")
 
@@ -87,7 +88,7 @@ def test_memory_api_list_is_scope_bound_and_ignores_message_prefix_records() -> 
         segments=[Segment(content="hidden infer source")],
         temporal=Temporal(t_ingest=visible.temporal.t_ingest),
     )
-    kernel.kv.insert(owner, messages_key(hidden.id), dumps(hidden))
+    kv.insert(owner, messages_key(hidden.id), dumps(hidden))
     api.add("other tenant memory", other, security=legacy_request_context(other))
 
     listed = api.list(owner, security=legacy_request_context(owner))
@@ -97,7 +98,7 @@ def test_memory_api_list_is_scope_bound_and_ignores_message_prefix_records() -> 
 
 
 def test_memory_api_list_filters_before_pagination_and_preserves_total_count() -> None:
-    api = build_kernel().api
+    api = assemble()
     scope = Scope(org="acme", user="owner")
 
     first = api.add(
@@ -142,8 +143,11 @@ def test_memory_api_list_filters_before_pagination_and_preserves_total_count() -
 
 
 def test_memory_api_list_copies_extensions_and_forwards_normalized_filters() -> None:
-    kernel = build_kernel()
-    api = kernel.api
+    # Kernel.kv 现为 manager 的授权代理（F07），monkey-patch 代理观察不到
+    # 数据面内部调用——改为注入 RecordingKV：注入实例同时是 manager 的 KV 端口
+    # 与数据面真源，list 透传 kwargs 在同一实例上可见。
+    kv = _RecordingKV()
+    api = assemble(kv=kv)
     scope = Scope(org="acme", user="owner")
     api.add(
         "alpha memory",
@@ -152,14 +156,6 @@ def test_memory_api_list_copies_extensions_and_forwards_normalized_filters() -> 
         user_metadata={"project": "alpha"},
     )
     extensions = {"vendor_mode": 7}
-    calls = []
-    original_list = kernel.kv.list
-
-    def recording_list(target_scope, **kwargs):
-        calls.append((target_scope, kwargs))
-        return original_list(target_scope, **kwargs)
-
-    kernel.kv.list = recording_list
     filters = FilterClause("user_metadata.project", FilterOp.EQ, "alpha")
 
     result = api.list(
@@ -171,14 +167,91 @@ def test_memory_api_list_copies_extensions_and_forwards_normalized_filters() -> 
 
     assert result.count == 1
     assert extensions == {"vendor_mode": 7}
-    assert calls[0][0] == scope
-    assert calls[0][1]["extensions"] == {"vendor_mode": "7"}
-    assert calls[0][1]["extensions"] is not extensions
-    assert calls[0][1]["filters"] == filters
+    assert kv.calls[0][0] == scope
+    assert kv.calls[0][1]["extensions"] == {"vendor_mode": 7}
+    assert kv.calls[0][1]["extensions"] is not extensions
+    assert kv.calls[0][1]["filters"] == filters
+
+
+def test_memory_api_list_extensions_pass_through_object_identity() -> None:
+    class _Probe:
+        pass
+
+    kv = _RecordingKV()
+    api = assemble(kv=kv)
+    scope = Scope(org="acme", user="owner")
+    api.add(
+        "identity memory",
+        scope,
+        security=legacy_request_context(scope),
+    )
+    probe = _Probe()
+    extensions = {"probe": probe, "depth": 2, "page_ctx": {"tab": "all"}}
+
+    api.list(
+        scope,
+        security=legacy_request_context(scope),
+        extensions=extensions,
+    )
+
+    received = kv.calls[0][1]["extensions"]
+    assert received["probe"] is probe
+    assert received["depth"] == 2
+    assert isinstance(received["depth"], int)
+    assert received["page_ctx"] == {"tab": "all"}
+    assert received is not extensions
+
+
+def test_memory_api_list_never_stringifies_extensions_on_full_chain() -> None:
+    """完整 list 链路不隐式调用 str()：str 会抛异常的扩展对象原样到达 KV 端口。
+
+    权限上下文构建（_list_permission_contexts）只解释 routing_fields 声明的
+    路由键；其余扩展值对权限层不透明——若内核在任何阶段 str() 它们，本测试
+    会在进入存储层之前就以 StringifyError 失败。
+    """
+
+    class _StringifyError(Exception):
+        pass
+
+    class _Opaque:
+        @staticmethod
+        def __str__() -> str:
+            raise _StringifyError("kernel must not stringify plugin extensions")
+
+    kv = _RecordingKV()
+    api = assemble(kv=kv)
+    scope = Scope(org="acme", user="owner")
+    api.add(
+        "opaque extension memory",
+        scope,
+        security=legacy_request_context(scope),
+    )
+    opaque = _Opaque()
+
+    result = api.list(
+        scope,
+        security=legacy_request_context(scope),
+        extensions={"vendor_runtime": opaque},
+    )
+
+    assert result.count == 1
+    assert kv.calls[0][1]["extensions"]["vendor_runtime"] is opaque
+
+
+class _RecordingKV(InMemoryKVStore):
+    """记录 list 入参（scope + kwargs），供透传断言。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[tuple[Scope, dict]] = []
+
+    def list(self, target_scope, **kwargs):
+        self.calls.append((target_scope, kwargs))
+        return super().list(target_scope, **kwargs)
 
 
 def test_memory_api_list_rejects_invalid_extensions_and_scope_filter() -> None:
-    api = build_kernel().api
+    api = assemble()
     scope = Scope(org="acme", user="owner")
 
     with pytest.raises(ValidationError):
@@ -188,7 +261,7 @@ def test_memory_api_list_rejects_invalid_extensions_and_scope_filter() -> None:
 
 
 def test_memory_api_list_validates_pagination() -> None:
-    api = build_kernel().api
+    api = assemble()
     scope = Scope(org="acme", user="owner")
 
     with pytest.raises(ValidationError):
@@ -198,7 +271,7 @@ def test_memory_api_list_validates_pagination() -> None:
 
 
 def test_memory_api_list_permission_routes_by_memory_type() -> None:
-    api = build_kernel(config=_routing_config()).api
+    api = assemble(config=_routing_config())
     owner = Scope(org="acme", user="owner")
     reader = Scope(org="acme", user="reader")
 
@@ -212,7 +285,7 @@ def test_memory_api_list_permission_routes_by_memory_type() -> None:
 
 
 def test_memory_api_unfiltered_list_uses_strict_fallback() -> None:
-    api = build_kernel(config=_routing_config()).api
+    api = assemble(config=_routing_config())
     owner = Scope(org="acme", user="owner")
     reader = Scope(org="acme", user="reader")
     api.add(
@@ -227,7 +300,7 @@ def test_memory_api_unfiltered_list_uses_strict_fallback() -> None:
 
 
 def test_memory_api_list_binds_extension_permission_route_to_filter() -> None:
-    api = build_kernel(config=_routing_config()).api
+    api = assemble(config=_routing_config())
     owner = Scope(org="acme", user="owner")
     reader = Scope(org="acme", user="reader")
     episodic = api.add(

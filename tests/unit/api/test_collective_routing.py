@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from jiuwen_memory.api.memory_api_impl import build_kernel
+from jiuwen_memory.api.memory_api_impl.assembly import _build_kernel as build_kernel
 from jiuwen_memory.common.errors import NotFoundError, PermissionDeniedError, ValidationError
 from jiuwen_memory.common.security.legacy import legacy_request_context
 from jiuwen_memory.common.security.space_roles import SpaceContentRole, SpaceGovernanceRole
@@ -295,16 +295,17 @@ def test_the_fallback_space_is_created_on_first_write(api) -> None:
 
     空间名由调用方自己的身份渲染而来，别的主体渲染不出它，归属该登记给谁是确定的。
     """
-    fresh = _kernel().api  # 一个空间都没建
+    kernel = _kernel()  # 一个空间都没建
+    fresh = kernel.api
     units = fresh.add(
         "偏好深色主题", scope=Scope(org=ORG), security=SEC_ALICE, system_metadata=COORDS_P1
     )
     assert units[0].scope.space == ALICE_SPACE
-    info = fresh.space_manager.get(ORG, ALICE_SPACE)
+    info = fresh.get_space(ORG, ALICE_SPACE, security=SEC_ALICE)
     assert [owner.user for owner in info.owners] == ["alice"]
     # 只建 fallback：坐标指向的协作空间不自动建——它的成员表内核产生不了。
     with pytest.raises(NotFoundError):
-        fresh.space_manager.get(ORG, PROJECT_SPACE)
+        kernel.space.get(ORG, PROJECT_SPACE)
 
 
 def test_auto_create_is_switchable_off() -> None:
@@ -353,7 +354,7 @@ def test_auto_create_does_not_resurrect_a_space_the_caller_cannot_write(api) -> 
     api.archive_space(ORG, ALICE_SPACE, security=SEC_ALICE)
     with pytest.raises(ValidationError, match="not writable"):
         api.add("偏好深色主题", scope=Scope(org=ORG), security=SEC_ALICE, system_metadata=COORDS_P1)
-    assert api.space_manager.get(ORG, ALICE_SPACE).status is SpaceStatus.ARCHIVED
+    assert api.get_space(ORG, ALICE_SPACE, security=SEC_ALICE).status is SpaceStatus.ARCHIVED
 
 
 def test_the_coordinates_key_is_what_requests_a_decision_not_an_empty_space() -> None:
@@ -1470,3 +1471,20 @@ def test_a_normal_decision_writes_no_degradation_record(api) -> None:
         if event.detail.get("entry") == "routing_degraded"
     ]
     assert degraded == []
+
+
+def test_cross_space_search_allows_empty_principal_when_governance_disabled() -> None:
+    """未装配空间治理时，空身份跨空间检索不抛权限错（运维通道）。
+
+    ``_search_spaces`` 的 ``require_principal`` 与单空间鉴权点同一门控：未装配空间治理
+    时不做形态校验。空身份的 ``spaces`` 反查取组织通配桶、空库返回空候选集，检索拿到空
+    结果而非权限拒绝。装配了空间治理的部署里空身份在鉴权点被拦截，见其余用例。
+    """
+    api = build_kernel().api  # 默认 sqlite：_needs_space_facts() 为假
+    ops = Scope(org=ORG)  # 主体维皆空，运维通道形态
+    result = api.search(
+        "hello",
+        Context(scope=Scope(org=ORG), extensions={"spaces": []}),
+        security=legacy_request_context(ops),
+    )
+    assert result.items == []

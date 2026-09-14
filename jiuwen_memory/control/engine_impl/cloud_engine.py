@@ -4,7 +4,7 @@
 CloudEngine 直接实现 :class:`control.engine.MemoryEngine`，不继承
 ``InMemoryEngine``，避免云侧 message_type 路由、安全 KV、scope 一致性校验与本地
 最小实现产生隐式耦合。它只编排已装配的 Ingestor / construction / retrieval /
-KVStore / control 算子，不在 engine 内拼 prompt、选模型或执行鉴权。
+DomainStore / control 算子，不在 engine 内拼 prompt、选模型或执行鉴权。
 """
 
 from __future__ import annotations
@@ -36,8 +36,8 @@ from jiuwen_memory.construction.evolver import Evolver, EvolverProducer
 from jiuwen_memory.construction.index_builder import IndexBuilder, IndexBuilderProducer
 from jiuwen_memory.control.base import ControlOperatorType
 from jiuwen_memory.control.engine import EngineProducer, MemoryEngine
-from jiuwen_memory.control.engine_impl.list_support import list_page
 from jiuwen_memory.control.engine_impl.middle_support import parse_middle_interval
+from jiuwen_memory.control.engine_impl.sweep_support import run_sweep
 from jiuwen_memory.control.jobs import JobFactory, JobFactoryProducer, JobType
 from jiuwen_memory.control.lifecycle import LifecycleManager, LifecycleProducer
 from jiuwen_memory.control.pipeline import MemoryPipeline, PipelineBinding, PipelineProducer
@@ -52,12 +52,14 @@ from jiuwen_memory.control.types import (
     MemoryListResult,
     MemoryPatch,
     PermissionContext,
+    SweepResult,
     UpdateMode,
 )
 from jiuwen_memory.ingest.ingestor import Ingestor, IngestorProducer
 from jiuwen_memory.retrieval.retriever import Retriever, RetrieverProducer
 from jiuwen_memory.retrieval.types import RetrievalQuery, RetrievalResult
-from jiuwen_memory.storage.storage import Storage, StorageProducer
+from jiuwen_memory.storage.domain_store import DomainStore
+from jiuwen_memory.storage.store_manager import StoreManagerProducer, resolve_name
 from jiuwen_memory.storage.types import IndexRemoveMode, IndexWriteMode
 
 logger = get_logger(__name__)
@@ -207,7 +209,7 @@ class CloudEngine(MemoryEngine):
         ingestor: Ingestor,
         index_builder: IndexBuilder,
         retriever: Retriever,
-        storage: Storage,
+        domain_store: DomainStore,
         scheduler: Scheduler,
         evolver: Evolver,
         lifecycle: LifecycleManager,
@@ -222,7 +224,7 @@ class CloudEngine(MemoryEngine):
         self._ingestor = ingestor
         self._index = index_builder
         self._retriever = retriever
-        self._storage = storage
+        self._domain_store = domain_store
         self._scheduler = scheduler
         self._evolver = evolver
         self._lifecycle = lifecycle
@@ -274,12 +276,13 @@ class CloudEngine(MemoryEngine):
             modality=source,
             data=b"" if is_video else content.encode("utf-8"),
             uri=content if is_video else "",
+            assets=list(assets or []),
             system_metadata=meta,
             user_metadata=dict(user_metadata or {}),
             occurred_at=occurred_at,
         )
         units = self._ingestor.ingest([payload])
-        self._prepare_ingested_units(units, scope, meta, assets=assets, tags=tags)
+        self._prepare_ingested_units(units, scope, meta, tags=tags)
 
         binding = self._write_binding(units)
         pipeline_name = binding.name if binding is not None else self._default_pipeline_name
@@ -435,13 +438,9 @@ class CloudEngine(MemoryEngine):
                 "CloudEngine.write middle=true requires an Evolver (装配未注入 evolver)"
             )
 
-        for unit in units:
-            unit.tier = MemoryTier.WORKING
-            unit.system_metadata["middle"] = "true"
-        await asyncio.to_thread(index_builder.build, units)
-
-        # 通过 JobFactory.get_job 的运行时覆盖入参注入 binding 的 evolver/index，
-        # 保证归档时 index.remove 用对正确的 index。
+        # 先构造 Job（纯内存操作）——通过 get_job 运行时覆盖入参注入 binding 的
+        # evolver/index（保证归档时 index.remove 用对正确的 index）；
+        # middle_interval=None 在此解析为 Spec 装配期默认值。
         job = self._job_factory.get_job(
             JobType.MIDDLE_TO_LONG,
             scope=scope,
@@ -449,6 +448,15 @@ class CloudEngine(MemoryEngine):
             index=index_builder,
             interval=middle_interval,
         )
+        # 落盘前校验可调度性（如 interval >= tick_interval）——失败时原文
+        # 未写 Storage、未建索引，不留「报错但数据已残留」的窗口。
+        self._scheduler.validate(job)
+
+        for unit in units:
+            unit.tier = MemoryTier.WORKING
+            unit.system_metadata["middle"] = "true"
+        await asyncio.to_thread(index_builder.build, units)
+
         await self._scheduler.submit(job, channel=Channel.BACKGROUND)
         logger.info(
             "CloudEngine.write middle=True: %d originals buffered, scope=%s "
@@ -476,8 +484,11 @@ class CloudEngine(MemoryEngine):
         extensions: dict[str, str] | None = None,
         filters: FilterExpr | None = None,
     ) -> MemoryListResult:
-        return list_page(
-            self._storage,
+        if offset < 0:
+            raise ValidationError("offset must be >= 0")
+        if limit <= 0:
+            raise ValidationError("limit must be > 0")
+        result = self._domain_store.list(
             scope,
             offset=offset,
             limit=limit,
@@ -485,6 +496,7 @@ class CloudEngine(MemoryEngine):
             extensions=extensions,
             filters=filters,
         )
+        return MemoryListResult(items=result.items, count=result.count)
 
     async def permission_context_for_unit(
         self, unit_id: str, scope: Scope
@@ -515,7 +527,7 @@ class CloudEngine(MemoryEngine):
     async def permission_contexts_for_delete(
         self, selector: DeleteSelector
     ) -> list[PermissionContext]:
-        scopes = [selector.scope] if selector.scope is not None else self._storage.scopes()
+        scopes = [selector.scope] if selector.scope is not None else self._domain_store.scopes()
         if not scopes:
             scopes = [Scope()]
         contexts: list[PermissionContext] = []
@@ -602,7 +614,7 @@ class CloudEngine(MemoryEngine):
         if selector_is_empty:
             raise ValidationError("DeleteSelector requires unit_ids, tags, before, or filters")
 
-        scopes = [selector.scope] if selector.scope is not None else self._storage.scopes()
+        scopes = [selector.scope] if selector.scope is not None else self._domain_store.scopes()
         if not scopes:
             scopes = [Scope()]
 
@@ -664,11 +676,23 @@ class CloudEngine(MemoryEngine):
         self._remove_indexes([unit for _, _, unit in matches], mode=IndexRemoveMode.SOFT)
         return affected
 
+    async def sweep_expired(self) -> SweepResult:
+        # C-03：lifecycle 只纯计算 transition；索引按各 pipeline 的 builder
+        # 分组做 remove(SOFT)，成功后回写真源（共享编排语义见 sweep_support）。
+        transitions = self._lifecycle.sweep()
+        for transition in transitions:
+            self._ensure_unit_scope(transition.unit, transition.scope)
+        return run_sweep(
+            transitions,
+            self._lifecycle,
+            lambda units: self._remove_indexes(units, mode=IndexRemoveMode.SOFT),
+        )
+
     async def purge_space(self, org: str, space: str) -> list[str]:
         purged: list[str] = []
         for scope in [
             candidate
-            for candidate in self._storage.scopes()
+            for candidate in self._domain_store.scopes()
             if candidate.org == org and candidate.space == space
         ]:
             units = self._list_units(scope)
@@ -688,13 +712,20 @@ class CloudEngine(MemoryEngine):
     async def evolve(
         self, scope: Scope, mode: EvolveMode, channel: Channel = Channel.BACKGROUND
     ) -> str:
-        """提交 EvolveJob 到 Scheduler——mode 经构造参数流入 EvolveJob（运行时参数，不进 Spec）。"""
+        """提交 EvolveJob 到 Scheduler——mode/evolver 运行时流入 EvolveJob（不进 Spec 装配）。"""
         if self._job_factory is None:
             raise RuntimeError(
                 "evolve requires job_factory, please configure "
                 "engine.default.job_factory"
             )
-        job = self._job_factory.get_job(JobType.EVOLVE, scope=scope, mode=mode)
+        if self._evolver is None:
+            raise RuntimeError(
+                "CloudEngine.evolve requires an Evolver (装配未注入 evolver)"
+            )
+        # E-06：evolve 必传注入——Job 使用 Engine 装配的同一实例，Spec 不自行解析。
+        job = self._job_factory.get_job(
+            JobType.EVOLVE, scope=scope, mode=mode, evolver=self._evolver
+        )
         job_id = await self._scheduler.submit(job, channel)
         logger.info(
             "CloudEngine.evolve submitted: job_id=%s scope=%s mode=%s channel=%s",
@@ -714,13 +745,19 @@ class CloudEngine(MemoryEngine):
     async def admin_all(self) -> dict[str, str]:
         raise NotImplementedError("admin 经 API 层直达 PolicyManager")
 
-    def _write_middle_to_kv(self, scope: Scope, units: list[MemoryUnit]) -> None:
-        """``asyncio.to_thread`` 只接 callable + args，抽成同步方法以便包装。"""
-        self._storage.add(scope, units)
+    def _load(self, scope: Scope, unit_id: str) -> MemoryUnit:
+        units = self._domain_store.get(scope, [unit_id])
+        if not units:
+            raise NotFoundError("memory_unit", unit_id)
+        unit = units[0]
+        self._ensure_unit_scope(unit, scope)
+        return unit
 
-    def _write_default_to_kv(self, scope: Scope, units: list[MemoryUnit]) -> None:
-        """``asyncio.to_thread`` 只接 callable + args，抽成同步方法以便包装。"""
-        self._storage.add(scope, units)
+    def _list_units(self, scope: Scope) -> list[MemoryUnit]:
+        units = self._domain_store.list(scope, limit=1_000_000).items
+        for unit in units:
+            self._ensure_unit_scope(unit, scope)
+        return units
 
     def _normalized_metadata(
         self, metadata: dict[str, MetadataValueType] | None
@@ -763,17 +800,11 @@ class CloudEngine(MemoryEngine):
         scope: Scope,
         system_metadata: dict[str, MetadataValueType],
         *,
-        assets: list[str] | None,
         tags: list[str] | None,
     ) -> None:
         for unit in units:
             self._ensure_unit_scope(unit, scope)
             unit.system_metadata.update(system_metadata)
-            if assets:
-                if not unit.segments:
-                    unit.segments = [Segment(assets=list(assets), source=unit.source)]
-                else:
-                    unit.segments[0].assets = list(assets)
             unit.tags = list(tags or [])
 
     def _stamp_pipeline(self, units: list[MemoryUnit], pipeline_name: str) -> None:
@@ -815,20 +846,6 @@ class CloudEngine(MemoryEngine):
     def _update_indexes(self, units: list[MemoryUnit]) -> None:
         for group in self._group_by_index(units):
             group.builder.update(group.units)
-
-    def _load(self, scope: Scope, unit_id: str) -> MemoryUnit:
-        units = self._storage.get(scope, [unit_id])
-        if not units:
-            raise NotFoundError("memory_unit", unit_id)
-        unit = units[0]
-        self._ensure_unit_scope(unit, scope)
-        return unit
-
-    def _list_units(self, scope: Scope) -> list[MemoryUnit]:
-        units = self._storage.list(scope, limit=1_000_000).items
-        for unit in units:
-            self._ensure_unit_scope(unit, scope)
-        return units
 
     def _version_family(self, scope: Scope, unit_id: str) -> list[MemoryUnit]:
         units_by_id = {unit.id: unit for unit in self._list_units(scope)}
@@ -895,7 +912,9 @@ def _build(config):
         IngestorProducer.dep(config, default="simple"),
         IndexBuilderProducer.dep(config, "index_builder", default=ib_default),
         RetrieverProducer.dep(config, default="pipeline"),
-        StorageProducer.resolve(config),
+        StoreManagerProducer.resolve(config).domain_store(
+            resolve_name(config, "domain_store")
+        ),
         SchedulerProducer.dep(config, default="in_process"),
         EvolverProducer.dep(config, default="orchestrating"),
         LifecycleProducer.dep(config, default="kv"),

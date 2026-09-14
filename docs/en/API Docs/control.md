@@ -31,7 +31,7 @@ MemoryAPI
   ├── Governor                    inspect / trace / audit
   ├── SpaceManager                Space management plane
   └── MemoryEngine                authorized data-plane orchestration
-       ├── write -> Ingestor -> Pipeline/Classifier -> IndexBuilder
+       ├── write -> RawPayload(assets) -> Ingestor(capability check/asset mapping) -> Pipeline/Classifier -> IndexBuilder
        ├── recall -> Pipeline -> Retriever
        ├── list/get -> Storage
        ├── update/delete -> LifecycleManager + IndexBuilder
@@ -83,6 +83,12 @@ the interface boundary; Engine does not create an event loop internally.
 | `await delete(selector)` | `list[str]` | Forgets, archives, downweights, or physically deletes selected units |
 | `await purge_space(org, space)` | `list[str]` | Removes records and derived indexes from every child Scope in a Space |
 
+`write` only makes a defensive copy of `assets` into `RawPayload.assets`. The Ingestor decides how
+to map those references into one or more `MemoryUnit.segments`; the Engine no longer assumes and
+backfills a “first Segment.” Before normalization, the Ingestor checks whether `source` belongs to
+the active `Normalizer.modalities()`. An unsupported source raises `UnsupportedCapabilityError`
+before any MemoryUnit, Storage write, or index write is produced.
+
 ### 3.2 Authorization-Context Helpers
 
 These methods only return information needed for API authorization. The API itself still invokes
@@ -120,6 +126,12 @@ Engine reads system control fields only from `system_metadata`:
 
 `middle=true` without `infer=true` is invalid. Control fields such as `infer`, `procedural`, and
 `middle` must not fall back to `user_metadata`.
+
+`middle_interval` (optional, in `system_metadata`) overrides the assembly-time default period. It
+must parse as a positive integer (non-numeric, 0, or negative values raise `ValidationError`), and
+its final value (explicit or assembly-time default) must be no smaller than the scheduler's
+`tick_interval`; otherwise `write` raises before persistence — nothing is written and no residual
+data is left behind.
 
 ### 3.5 Update and Delete Semantics
 
@@ -762,6 +774,7 @@ are combined with AND.
 | Unit absent or no valid version at `as_of` | Engine `get/update` | `NotFoundError` |
 | DeleteSelector has no ID/tag/before | Engine `delete` | `ValidationError` |
 | `InMemoryEngine` receives a non-empty Space | Any data-plane method | `ValidationError` |
+| `source` is outside the active Normalizer capability set | Engine `write` / `batch_write` | `UnsupportedCapabilityError` |
 | Invalid lifecycle transition | `transition` / `supersede` | `ValidationError` or `PolicyError` |
 | Job absent | Scheduler `status` | `NotFoundError` |
 | Controller closed or queue full | Ingest `submit` | `BackendError` |

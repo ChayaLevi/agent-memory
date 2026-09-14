@@ -28,7 +28,7 @@ from jiuwen_memory.control.engine_impl.cloud_engine import CloudEngine
 from jiuwen_memory.control.jobs import Job, JobFactory, JobType
 from jiuwen_memory.control.jobs_impl.evolve_job import EvolveJobSpec
 from jiuwen_memory.control.jobs_impl.middle_to_long_job import MiddleToLongJobSpec
-from jiuwen_memory.control.lifecycle import LifecycleManager
+from jiuwen_memory.control.lifecycle import LifecycleManager, SweepTransition
 from jiuwen_memory.control.pipeline import MemoryPipeline, PipelineBinding
 from jiuwen_memory.control.scheduler_impl.in_process_scheduler import InProcessScheduler
 from jiuwen_memory.control.types import (
@@ -44,8 +44,8 @@ from jiuwen_memory.retrieval.base import RetrievalOperatorType
 from jiuwen_memory.retrieval.retriever import Retriever
 from jiuwen_memory.retrieval.types import RetrievalQuery, RetrievalResult, RetrievedItem
 from jiuwen_memory.storage.kv_impl.in_memory_kv_store import InMemoryKVStore
-from jiuwen_memory.storage.storage_impl.composite_storage import CompositeStorage
 from jiuwen_memory.storage.types import IndexRemoveMode, IndexWriteMode
+from tests.conftest import make_storage
 
 pytestmark = pytest.mark.unit
 
@@ -83,15 +83,49 @@ class _RecordingIngestor(Ingestor):
         return units
 
 
-class _RecordingIndexBuilder(IndexBuilder):
-    """记录调用并交付 Storage 的替身——IndexBuilder 是记忆写入的唯一入口。"""
+class _AssetRoutingIngestor(Ingestor):
+    """把资产映射到第二个 Segment，用于验证 Engine 不解释映射关系。"""
 
-    def __init__(self, name: str, storage=None) -> None:
+    def __init__(self) -> None:
+        self.received_assets: list[list[str]] = []
+
+    @staticmethod
+    def operator_type() -> IngestOperatorType:
+        return IngestOperatorType.INGESTOR
+
+    @staticmethod
+    def health() -> None:
+        return None
+
+    def ingest(self, payloads: list[RawPayload]) -> list[MemoryUnit]:
+        self.received_assets.extend(list(payload.assets) for payload in payloads)
+        return [
+            MemoryUnit(
+                id=payload.id,
+                scope=payload.scope,
+                segments=[
+                    Segment(content=payload.data.decode("utf-8"), source=payload.modality),
+                    Segment(assets=list(payload.assets), source=payload.modality),
+                ],
+                system_metadata=dict(payload.system_metadata),
+                user_metadata=dict(payload.user_metadata),
+            )
+            for payload in payloads
+        ]
+
+
+class _RecordingIndexBuilder(IndexBuilder):
+    """记录调用并交付真源的替身——IndexBuilder 是记忆写入的唯一入口。
+
+    交付走 KV 直写（``memory_key`` + ``dumps``，ForwardIndexBuilder 模式）。
+    """
+
+    def __init__(self, name: str, kv=None) -> None:
         self.name = name
         self.built: list[str] = []
         self.updated: list[str] = []
         self.removed: list[str] = []
-        self._storage = storage
+        self._kv = kv
 
     def operator_type(self) -> OperatorType:
         return OperatorType.INDEX_BUILDER
@@ -104,25 +138,25 @@ class _RecordingIndexBuilder(IndexBuilder):
     ) -> None:
         self.built.extend(unit.content for unit in units)
         # 遵守契约：mode=RETRIEVAL_ONLY 表示本体已存在、只补建派生索引，不得再写本体。
-        if mode is not IndexWriteMode.RETRIEVAL_ONLY and self._storage is not None:
+        if mode is not IndexWriteMode.RETRIEVAL_ONLY and self._kv is not None:
             for unit in units:
-                self._storage.add(unit.scope, [unit])
+                self._kv.insert(unit.scope, memory_key(unit.id), dumps(unit))
 
     def update(
         self, units: list[MemoryUnit], *, mode: IndexWriteMode = IndexWriteMode.ALL
     ) -> None:
         self.updated.extend(unit.id for unit in units)
-        if self._storage is not None:
+        if self._kv is not None:
             for unit in units:
-                self._storage.update(unit.scope, [unit])
+                self._kv.update(unit.scope, memory_key(unit.id), dumps(unit))
 
     def remove(
         self, units: list[MemoryUnit], *, mode: IndexRemoveMode = IndexRemoveMode.HARD
     ) -> None:
         self.removed.extend(unit.id for unit in units)
-        if mode is IndexRemoveMode.HARD and self._storage is not None:
+        if mode is IndexRemoveMode.HARD and self._kv is not None:
             for unit in units:
-                self._storage.delete(unit.scope, [unit.id])
+                self._kv.delete(unit.scope, memory_key(unit.id))
 
     def rebuild(self) -> None:
         return None
@@ -204,6 +238,26 @@ class _RecordingKVStore(InMemoryKVStore):
         return super().list(scope, **kwargs)
 
 
+class _RecordingDomainStore:
+    def __init__(self, delegate) -> None:
+        self._delegate = delegate
+        self.get_calls = []
+        self.list_calls = []
+        self.scopes_calls = 0
+
+    def get(self, scope, unit_ids):
+        self.get_calls.append((scope, unit_ids))
+        return self._delegate.get(scope, unit_ids)
+
+    def list(self, scope, **kwargs):
+        self.list_calls.append((scope, kwargs))
+        return self._delegate.list(scope, **kwargs)
+
+    def scopes(self):
+        self.scopes_calls += 1
+        return self._delegate.scopes()
+
+
 class _NoopLifecycle(LifecycleManager):
     def operator_type(self) -> ControlOperatorType:
         return ControlOperatorType.LIFECYCLE
@@ -217,7 +271,7 @@ class _NoopLifecycle(LifecycleManager):
     def supersede(self, scope, unit_id, invalid_at):
         raise AssertionError("not used in these tests")
 
-    def sweep(self):
+    def sweep(self) -> list[SweepTransition]:
         return []
 
 
@@ -259,12 +313,11 @@ def _build_test_job_factory(
         def chat(self, messages: list[ChatMessage], **options: object) -> str:
             return messages[-1].content if messages else ""
 
-    storage = CompositeStorage(kv=kv)
     factory = JobFactory()
     factory.register(
         JobType.MIDDLE_TO_LONG,
         MiddleToLongJobSpec(
-            storage=storage,
+            kv=kv,
             evolver=evolver,
             lifecycle=lifecycle,
             index=index,
@@ -276,7 +329,7 @@ def _build_test_job_factory(
     )
     factory.register(
         JobType.EVOLVE,
-        EvolveJobSpec(storage=storage, evolver=evolver).with_scope,
+        EvolveJobSpec(kv=kv, evolver=evolver).with_scope,
     )
     return factory
 
@@ -300,11 +353,11 @@ class _MessageTypePipeline(MemoryPipeline):
         return self.profiles.get(route, self.profiles["chat"])
 
 
-def _engine():
+def _engine(ingestor: Ingestor | None = None):
     kv = _RecordingKVStore()
-    storage = CompositeStorage(kv=kv)
-    chat_index = _RecordingIndexBuilder("chat", storage)
-    coding_index = _RecordingIndexBuilder("coding", storage)
+    domain_store = _RecordingDomainStore(make_storage(kv=kv).domain_store())
+    chat_index = _RecordingIndexBuilder("chat", kv)
+    coding_index = _RecordingIndexBuilder("coding", kv)
     chat_classifier = _RecordingClassifier("chat")
     coding_classifier = _RecordingClassifier("coding")
     chat_retriever = _RecordingRetriever("chat")
@@ -329,10 +382,10 @@ def _engine():
     }
     return (
         CloudEngine(
-            ingestor=_RecordingIngestor(),
+            ingestor=ingestor or _RecordingIngestor(),
             index_builder=chat_index,
             retriever=chat_retriever,
-            storage=storage,
+            domain_store=domain_store,
             scheduler=InProcessScheduler(),
             evolver=chat_evolver,
             lifecycle=_NoopLifecycle(),
@@ -343,6 +396,7 @@ def _engine():
         ),
         {
             "kv": kv,
+            "domain_store": domain_store,
             "chat_index": chat_index,
             "coding_index": coding_index,
             "chat_classifier": chat_classifier,
@@ -353,6 +407,24 @@ def _engine():
             "coding_evolver": coding_evolver,
         },
     )
+
+
+def test_cloud_engine_delegates_assets_mapping_to_ingestor() -> None:
+    ingestor = _AssetRoutingIngestor()
+    engine, _ = _engine(ingestor)
+    assets = ["file:///video.mp4", "file:///transcript.json"]
+
+    units = asyncio.run(
+        engine.write(
+            "normalized content",
+            Scope(org="acme", user="alice"),
+            assets=assets,
+        )
+    )
+
+    assert ingestor.received_assets == [assets]
+    assert units[0].segments[0].assets == []
+    assert units[0].segments[1].assets == assets
 
 
 def test_cloud_engine_write_routes_by_message_type_and_stamps_metadata() -> None:
@@ -428,7 +500,10 @@ def test_cloud_engine_batch_write_collects_unexpected_error_and_skips_after_fail
     engine.write = _raise_unexpected  # type: ignore[method-assign]
     result = asyncio.run(
         engine.batch_write(
-            [BatchWriteItem(content="first", scope=scope), BatchWriteItem(content="second", scope=scope)],
+            [
+                BatchWriteItem(content="first", scope=scope),
+                BatchWriteItem(content="second", scope=scope),
+            ],
             continue_on_error=False,
         )
     )
@@ -512,7 +587,7 @@ def test_cloud_engine_list_forwards_query_and_returns_total_count() -> None:
     assert result.count == 2
     assert len(result.items) == 1
     assert result.items[0].id in {first.id, second.id}
-    call_scope, call_options = records["kv"].list_calls[0]
+    call_scope, call_options = records["domain_store"].list_calls[0]
     assert call_scope == scope
     assert call_options["offset"] == 1
     assert call_options["limit"] == 1
@@ -590,9 +665,8 @@ def _engine_with_job_factory(
     job._evolver / job._index 为 binding 选的——这是测试要验证的关键点。
     """
     kv = InMemoryKVStore()
-    storage = CompositeStorage(kv=kv)
-    chat_index = _RecordingIndexBuilder("chat", storage)
-    coding_index = _RecordingIndexBuilder("coding", storage)
+    chat_index = _RecordingIndexBuilder("chat", kv)
+    coding_index = _RecordingIndexBuilder("coding", kv)
     chat_evolver = _RecordingEvolver("chat", kv)
     coding_evolver = _RecordingEvolver("coding", kv)
     lifecycle = _NoopLifecycle()
@@ -613,12 +687,16 @@ def _engine_with_job_factory(
             classifier=_RecordingClassifier("coding"),
         ),
     }
-    factory = _build_test_job_factory(kv, chat_evolver, lifecycle, chat_index) if with_job_factory else None
+    factory = (
+        _build_test_job_factory(kv, chat_evolver, lifecycle, chat_index)
+        if with_job_factory
+        else None
+    )
     engine = CloudEngine(
         ingestor=_RecordingIngestor(),
         index_builder=chat_index,
         retriever=_RecordingRetriever("chat"),
-        storage=storage,
+        domain_store=make_storage(kv=kv).domain_store(),
         scheduler=scheduler,
         evolver=chat_evolver,
         lifecycle=lifecycle,
@@ -765,7 +843,8 @@ def test_cloud_engine_evolve_submits_evolve_job_via_job_factory() -> None:
     assert channel == Channel.HOT
     assert job.scope == scope
     assert job.interval == 0  # EvolveJob 是一次性任务
-    assert job._mode == EvolveMode.CONSOLIDATE  # mode 经构造参数流入  # pylint: disable=protected-access
+    # mode 经构造参数流入。
+    assert job._mode == EvolveMode.CONSOLIDATE  # pylint: disable=protected-access
 
 
 def test_cloud_engine_evolve_raises_when_job_factory_is_none() -> None:

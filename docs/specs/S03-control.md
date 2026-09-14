@@ -5,10 +5,10 @@
 | 项 | 值 |
 |---|---|
 | 关联模块 | jiuwen_memory/control/ |
-| 最近一次修订日期 | 2026-08-29 |
+| 最近一次修订日期 | 2026-09-11 |
 | 关联特性补充 | docs/features/api/F04-memory-metadata-separation.md |
 | 规划中的变更 | 群体记忆与空间治理（含契约与决策）见 [F07-collective-memory-design.md](../features/control/F07-collective-memory-design.md)；本文描述当前形态 |
-| 关联特性文档 | docs/features/F01-system-spec-design.md，docs/features/api/F01-memory-api-impl-design.md，docs/features/api/F02-write-infer-extract.md，docs/features/api/F03-batch-write-api.md，docs/features/construction/F02-dynamic-extraction-consolidation.md，docs/features/construction/F04-cc-memory-compat.md，docs/features/construction/F07-memory-write-entry.md，docs/features/control/F02-control-isolation-and-audit.md，docs/features/control/F03-control-pipeline-routing.md，docs/features/control/F04-permission-context-routing.md，docs/features/control/F05-cloud-engine-design.md，docs/features/common/F08-memory-tree.md，docs/features/common/F03-scope-space-isolation.md，docs/features/retrieval/F03-metadata-filtering.md，docs/features/config/F01-config-source.md |
+| 关联特性文档 | docs/features/F01-system-spec-design.md，docs/features/api/F01-memory-api-impl-design.md，docs/features/api/F02-write-infer-extract.md，docs/features/api/F03-batch-write-api.md，docs/features/construction/F02-dynamic-extraction-consolidation.md，docs/features/construction/F04-cc-memory-compat.md，docs/features/construction/F07-memory-write-entry.md，docs/features/control/F02-control-isolation-and-audit.md，docs/features/control/F03-control-pipeline-routing.md，docs/features/control/F04-permission-context-routing.md，docs/features/control/F05-cloud-engine-design.md，docs/features/control/F06-middle-term-memory.md，docs/features/control/F08-engine-job-builder-alignment.md，docs/features/common/F08-memory-tree.md，docs/features/common/F03-scope-space-isolation.md，docs/features/retrieval/F03-metadata-filtering.md，docs/features/config/F01-config-source.md，docs/features/ingest/F02-assets-ingestor-boundary.md，docs/features/storage/F07-storage-manager-domain-store-split.md |
 
 ## Metadata 编排契约
 
@@ -27,6 +27,7 @@
 - 长耗时摄入任务的队列、状态持久化和 Scope 内幂等
 - 运行时可变策略的查询与调整
 - space 生命周期、策略、成员、用量、导出与 offboarding 管理
+- 应用端口（`control/application`）：已鉴权之后的数据面命令/查询、治理读取、Space 删除事务的 typed 入口；包装现有算子，不是新算子
 
 **不管什么**：
 - 不执行鉴权（PEP 在 `jiuwen_memory/api` 层，Engine 信任传入的 scope）
@@ -63,6 +64,9 @@
 20. **结构与生命周期事务（目标）**：`provenance`、`supersedes` 与 `hierarchy` 分别表示演进来源、版本替换和父子包含；FORGET/PURGE 不级联删除后代内容。
 21. **重叠 span 串行化（目标）**：同一 `scope + kind` 下 span 相交的 HIERARCHY build/replace、层级 update、FORGET 和 PURGE 必须串行化，或以乐观版本条件在提交前检测冲突；replace 不得吸收未参与初始输入快照的并发叶写入。
 22. **判权范围的裁剪可落本层，判权的执行不可**：`collective/write_targets.py` 决定哪些候选空间被送去判权（候选渲染、排序与上限截断），判权本身经 `can_write` 回调由 API 层执行；本层不持有 `PermissionManager`、不接收 `identity`、不抛权限异常——缺兜底落点时返回 `WriteTargets.fallback=None`，由 PEP 抛出。该裁剪可下沉的前提是失效方向为拒绝：未参与判权的空间不进候选，表现为写不进去而非越权写入。**检索侧的逐空间判权循环不适用本条**，其循环体就是 `PermissionManager.decide` 本身，移出等于把 PEP 分裂为两处；逐空间系统谓词的生成同样留 API 层，它按 `identity` 与空间事实取值。检索侧可下沉的是判权之后的部分：`collective/cross_space_recall.py` 收已判权的空间目标（含各自的谓词）与 `recall` 回调，做取数上界摊配、召回扇出与结果合并，全程不读 `identity`、不做任何裁决，与写入侧同一形态。它把空间级扇出失败与判权剔除分两路交回——并进 `merged.errors` 之后，扇出失败会与检索层的分通道错误混在同一个列表里，API 层要为「整个空间挂了」写审计就只能按 `channel is SPACE` 过滤，那是把审计判据绑在本层的 channel 编码上。
+23. **应用端口不是算子**：`control/application` 的 `MemoryCommandService` / `MemoryQueryService` / `SpaceLifecycleService` / `GovernanceService` 无 Producer、不执行 PEP、不接收 `identity`。它们由已注入的 Engine / Governor / SpaceManager 组成，供 API 与单测复用同一语义，禁止 Service Locator。`delete_space` 的 purge → SpaceManager.delete → `deleted_counts` 汇总只允许出现在 `SpaceLifecycleService`。purge 成功而 metadata delete 失败必须抛 `PartialFailureError`，重试入口仍是 `delete_space`。路由谓词回注、逐空间判权和逐单元结果鉴权仍属 PEP（见不变量 22），不经这些端口下沉。
+24. **Engine 不解释资产映射**：`write` 只把 `assets` 防御性复制到 `RawPayload.assets` 后交给 Ingestor；Ingestor 返回后，Engine 不得按“首个 Segment”或其他假设改写 `Segment.assets`。
+25. **后台 Job 的 IndexBuilder/Evolver 由 Engine 运行时注入**：`EvolveJobSpec` / `MiddleToLongJobSpec` 装配期不解析 Evolver/IndexBuilder（不按 `vector_enabled` 猜默认、不调对应 Producer）；Engine 经 `JobFactory.get_job` 必传注入与写入/演进同源的实例（middle 路径传 pipeline binding 或单 profile 的 `index=`/`evolver=`，`evolve` 传 Engine 装配的 `evolver=`），运行时注入优先于 Spec 兜底字段；缺失注入时 `with_scope` 抛 `ValidationError`，不静默回退默认实现。
 
 ## 接口契约
 
@@ -80,28 +84,31 @@ class ControlOperator(ABC):
 
 ### MemoryEngine（`engine.py`）
 
-编排接口层各语义的中枢。注入依赖：Ingestor、Classifier、IndexBuilder、Evolver、Retriever、Storage、Scheduler、LifecycleManager；可选注入 MemoryPipeline 做按记忆类型或 message_type 的 profile 选择。Evolver 有两个平级注册实现：`OrchestratingEvolver`（注册名 `orchestrating`）与其子类 `DynamicEvolver`（注册名 `dynamic`，EXTRACT 走 extract→consolidate→reflect→落盘）；装配或 profile 选择决定实际路径。
+编排接口层各语义的中枢。共同依赖 Ingestor、Classifier、IndexBuilder、Evolver、Retriever、Scheduler、LifecycleManager，可选注入 MemoryPipeline 做按记忆类型或 message_type 的 profile 选择。存储面按实现区分：`InMemoryEngine` 注入 KVStore 并沿用 `load_units`/`list_units` helper；`CloudEngine` 注入 DomainStore 作为 MemoryUnit 领域真源读入口。Evolver 有两个平级注册实现：`OrchestratingEvolver`（注册名 `orchestrating`）与其子类 `DynamicEvolver`（注册名 `dynamic`，EXTRACT 走 extract→consolidate→reflect→落盘）；装配或 profile 选择决定实际路径。
 
 | 方法 | 签名 | 语义 |
 |------|------|------|
-| `write` | `async (content, scope, source, *, assets, tags, metadata: dict[str, Any] \| None, occurred_at) -> list[MemoryUnit]` | 规约→可选抽取/分类→落盘+建索引；`infer=true` 时返回 `created_ids` 对应的派生结果，否则处理原始单元（直写不去重） |
+| `write` | `async (content, scope, source, *, assets, tags, system_metadata, user_metadata, occurred_at) -> list[MemoryUnit]` | 规约→可选抽取/分类→落盘+建索引；`infer=true` 时返回 `created_ids` 对应的派生结果，否则处理原始单元（直写不去重） |
 | `batch_write` | `async (items: list[BatchWriteItem], *, continue_on_error=True) -> BatchWriteResult` | 只接收 API 已归一化并完成鉴权/space 前置校验的项；按输入顺序复用 `write`，归集领域异常及非领域异常（后者为 `InternalError`）；fail-fast 时填充 `Skipped` outcomes |
 | `recall` | `async (scope, query: RetrievalQuery) -> RetrievalResult` | 委托 Retriever 完整检索链路（含目标 `expand_depth>0` 时的内部展开） |
-| `list` | `async (scope, *, offset=0, limit=100, memory_types=None, extensions=None, filters=None) -> MemoryListResult` | 校验分页参数并完整委托 `Storage.list`；返回当前页和分页前匹配总数 |
+| `list` | `async (scope, *, offset=0, limit=100, memory_types=None, extensions=None, filters=None) -> MemoryListResult` | 校验分页参数并委托当前实现的存储读入口（InMemoryEngine 为 KVStore，CloudEngine 为 DomainStore）；返回当前页和分页前匹配总数 |
 | `permission_context_for_unit` | `async (unit_id, scope) -> PermissionContext` | 读取已有记忆的权限上下文，只返回 memory_type/tags/metadata 等鉴权元数据，不返回 content/assets |
-| `list_with_permission_contexts` | `async (同 list 参数) -> tuple[MemoryListResult, list[PermissionContext]]` | 从同一次 KV 查询的当前页构造逐项真源权限上下文，items/count/context 不做二次读取 |
+| `list_with_permission_contexts` | `async (同 list 参数) -> tuple[MemoryListResult, list[PermissionContext]]` | 从同一次列表查询的当前页构造逐项真源权限上下文，items/count/context 不做二次读取 |
 | `permission_contexts_for_delete` | `async (selector: DeleteSelector) -> list[PermissionContext]` | 解析 delete selector 命中的候选 unit 权限上下文，供 API 层逐条鉴权 |
 | `get` | `async (unit_id, scope, as_of=None) -> MemoryUnit` | 真源点读；`as_of` 非空沿 supersedes 链返回当时有效版本 |
 | `update` | `async (unit_id, scope, patch: MemoryPatch) -> MemoryUnit` | SUPERSEDE 新 id 记版本链 / OVERWRITE 原地覆写；目标层级 patch 走结构事务 |
 | `delete` | `async (selector: DeleteSelector) -> list[str]` | PURGE 物理删 / 其他委托 LifecycleManager 非破坏式流转；目标需维护受影响层级边 |
 | `purge_space` | `async (org: str, space: str) -> list[str]` | 物理删除该 Space 全部 user/agent/session 子 Scope 的 MemoryUnit 真源与索引，供 offboarding 调用 |
-| `evolve` | `async (scope, mode: EvolveMode, channel=BACKGROUND, *, hierarchy_options=None) -> str` | 提交演进任务到 Scheduler；执行逻辑由构建层 Evolver 完成，返回 job_id；仅目标 HIERARCHY 接受 options |
+| `sweep_expired` | `async () -> SweepResult` | 编排到期清扫：`LifecycleManager.sweep()` 纯计算 transition，按 (scope, 目标态) 分组执行——FORGOTTEN 组先 `IndexBuilder.remove(SOFT)` 移出检索索引、成功后 `LifecycleManager.transition` 回写真源；ARCHIVED 组只回写（`include_archived` 召回与 `as_of` 回溯仍需索引，不删）。顺序不变量（先删索引、后回写真源）保证 remove 失败时单元保持 ACTIVE、下轮 sweep 重新发现自愈；任一步失败的组计入 `SweepResult.failed`，不静默当成功。共享编排在 `engine_impl/sweep_support.py`，InMemoryEngine 直调 IndexBuilder，CloudEngine 按各 pipeline 的 builder 分组删除 |
+| `evolve` | `async (scope, mode: EvolveMode, channel=BACKGROUND, *, hierarchy_options=None) -> str` | 提交演进任务到 Scheduler；执行逻辑由构建层 Evolver 完成，返回 job_id；仅目标 HIERARCHY 接受 options。Evolver 由 Engine 经 `get_job(evolver=...)` 注入装配给自身的同一实例（与写入侧同源，不变量 25），Engine 未装配 evolver 时抛 `RuntimeError` |
 | `admin_get/set/all` | — | 管理面语义由 API 层直达 PolicyManager，Engine 不承载策略存储 |
 
 **write 路径**：
 ```
-Ingestor.ingest([RawPayload]) → list[MemoryUnit]
-→ 将 metadata/assets/tags 入参补入接入层产出的 MemoryUnit
+Engine 组装 RawPayload（含 assets 的防御性副本）
+→ Ingestor.ingest([RawPayload]) → list[MemoryUnit]
+  # assets 如何映射到 Segment 由 Ingestor 实现决定
+→ Engine 补充引擎管理的 metadata/tags，不改写 Segment.assets
 → MemoryPipeline.select_for_write(units)  # 可选；未注入时使用 Engine 默认组件
 → if str((metadata or {}).get("procedural", "")).strip().lower() == "true"
      or str((metadata or {}).get("infer", "")).strip().lower() == "true":
@@ -254,7 +261,7 @@ pipeline:
 |------|------|------|
 | `transition` | `(scope: Scope, unit_ids: list[str], target: LifecycleState) -> None` | 在指定 Scope 内批量非破坏式状态标记 |
 | `supersede` | `(scope: Scope, unit_id: str, invalid_at: datetime) -> MemoryUnit` | 在指定 Scope 内将旧版本标记 SUPERSEDED，并把 valid-time 失效边界设为 `invalid_at` |
-| `sweep` | `() -> list[str]` | 扫描到期（`t_invalid` 已过）的 active 单元，标记 FORGOTTEN；目标挂树 unit 必须走与 FORGET 相同的断边编排 |
+| `sweep` | `() -> list[SweepTransition]` | 纯计算：扫描到期（`t_invalid` 已过）的 active 单元与 superseded 旧版本，按策略给出目标态，返回待执行 transition（含 Scope、unit_id、from/to state、扫描时单元快照）；不写真源、不触碰检索索引。执行由 `MemoryEngine.sweep_expired` 编排 |
 
 LifecycleManager 不修改 `HierarchyStatus`。结构 status 的 ACTIVE 不会覆盖 ARCHIVED/FORGOTTEN 等生命周期过滤。
 
@@ -317,10 +324,13 @@ delegate，避免调用方理解授权记录应落在哪个后端。路由值只
 声明的业务值，未知值和直接 policy 名都落 `fallback`；`fallback` 在装配期禁止指向
 `allow_all`。
 
-recall 完成权限检查后，API 读取 `PermissionManager.routing_fields()`，把授权所依据
-的路由值作为等值系统谓词回注查询，并与用户 `FilterExpr` 做外层 `AND`。这保证
-“选择哪条权限策略”和“实际能读取哪类数据”使用同一个值，用户表达式中的 `OR`
-不能绕过该约束。
+recall / list 完成权限检查前，API 构造 `PermissionContext` 时从
+`extensions` 取路由值**只解释 `PermissionManager.routing_fields()` 声明的键**
+（extensions 优先、filter 等值兜底）；其余扩展键对权限层不透明——不进
+`PermissionContext.metadata`，也不被隐式 `str()`。完成权限检查后，API 读取
+`PermissionManager.routing_fields()`，把授权所依据的路由值作为等值系统谓词回注
+查询，并与用户 `FilterExpr` 做外层 `AND`。这保证“选择哪条权限策略”和“实际能读取
+哪类数据”使用同一个值，用户表达式中的 `OR` 不能绕过该约束。
 
 ### Scheduler（`scheduler.py`）
 
@@ -397,6 +407,12 @@ space 元数据、space policy、成员、用量与 offboarding 状态管理。
 | `PermissionManager` | 在上游安全模块合入后退出请求授权路径，只服务兼容测试。授权判定迁至安全层的 `Authorizer` 实现，本层不再承载判定 | 规划中，随上游合入 |
 
 **两轴角色枚举、三张动作矩阵与身份推导比较函数不落本层**，落 `common/security/`：其元素类型取上游 12 值 `Action`，而本层 `types.py` 已有五值 `Action` 且 `Grant.actions` 仍在使用，同一模块内两者无法共存；更根本的是这些常量与函数的消费方跨安全层、API 层与控制层三侧，落本层即安全层反向依赖控制层。本层只消费它们作为成员记录的字段类型。
+
+#### 应用端口（B-03）
+
+| 项 | 内容 | 状态 |
+|---|---|---|
+| 新增子包 `application/` | 四个非算子应用端口，由已注入的 Engine/Governor/SpaceManager 组成，不执行 PEP、不接收 `identity`。`MemoryCommandService`：write/batch_write/update/delete/evolve；`MemoryQueryService`：recall/list_with_permission_contexts/get 与鉴权元数据读取；`SpaceLifecycleService`：purge + SpaceManager.delete + `deleted_counts` 汇总；`GovernanceService`：inspect/trace/audit。SDK/HTTP/MCP 经 `LocalMemoryAPI` 共用同一组端口。带实现的模块收在子包而非顶层 | 已落地 |
 
 ## 数据结构
 
@@ -476,7 +492,7 @@ jiuwen_memory/control/<算子>_impl/
 | S02-memory_api | 数据面委托 MemoryEngine；治理/授权/调度/策略/space 管理面直达控制算子 |
 | S04-retrieval | Retriever 检索链路 |
 | S05-construction | Engine/Scheduler 驱动构建层 IndexBuilder/Evolver；演进逻辑由构建层执行 |
-| S06-storage | 控制层经 IndexBuilder 写正排与派生索引，直接调用 Storage 只读（get/list/scopes）；LifecycleManager/Governor 的目标操作按显式 Scope 点查或枚举，只有 sweep/offboarding 这类全局管理任务使用 `kv.scopes()` |
+| S06-storage | 控制层经 IndexBuilder 写正排与派生索引；`InMemoryEngine` 继续使用 KVStore 读取，`CloudEngine` 的 MemoryUnit 读取经注入的 DomainStore（点读 `get` / 列表 `list` / 枚举 `scopes()`）。原始消息、构建层专用数据及其他 KV 专用消费者仍按各自职责使用 KVStore。LifecycleManager/Governor 的目标操作按显式 Scope 点查或枚举，只有 sweep/offboarding 这类全局管理任务跨 Scope 枚举 |
 | S07-common | 控制层消费 `MemoryUnit`、`AuditEvent`、错误类型等公共结构 |
 | F07-collective-memory | 两轴角色、归属登记、空间授权事实快照落本层类型；`MembershipResolver` 是本层新增算子，`SpaceManager` 增 `spaces_for` 反查；授权判定迁出本层 |
 | architecture.md §3.1 | MemoryUnit 数据模型（lifecycle / temporal / supersedes / provenance）由 `common/type_def` 定义，控制层消费 |
