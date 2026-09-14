@@ -335,11 +335,11 @@ def _parse_envelope(ciphertext: bytes) -> _Envelope:
     if len(ciphertext) < offset + body_len:
         raise CorruptedCiphertextError("ENC1 envelope length is incomplete")
 
-    encrypted_key = ciphertext[offset : offset + key_len]
+    encrypted_key = ciphertext[offset: offset + key_len]
     offset += key_len
-    key_nonce = ciphertext[offset : offset + key_nonce_len]
+    key_nonce = ciphertext[offset: offset + key_nonce_len]
     offset += key_nonce_len
-    data_nonce = ciphertext[offset : offset + data_nonce_len]
+    data_nonce = ciphertext[offset: offset + data_nonce_len]
     offset += data_nonce_len
     encrypted_content = ciphertext[offset:]
     if not encrypted_content:
