@@ -10,6 +10,8 @@ from importlib import import_module
 
 from jiuwen_memory.storage.entity_store import EntityStoreProducer
 
-import_module(".elasticsearch_entity_store", __name__)  # 触发 @EntityStoreProducer.register("elasticsearch")
+import_module(
+    ".elasticsearch_entity_store", __name__
+)  # 触发 @EntityStoreProducer.register("elasticsearch")
 
 __all__ = ["EntityStoreProducer"]

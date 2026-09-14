@@ -12,7 +12,8 @@
 - Rail 调用点：``openjiuwen/harness/rails/memory/external_memory_rail.py``
 
 设计要点（见 ``docs/features/AgentMemory-JiuwenSwarm接入适配分析.md``）：
-- 双模式：``base_url`` 非空 → HTTP（路径 B，全 async，推荐生产）；否则进程内 ``assemble()``（路径 A）
+- 双模式：``base_url`` 非空 → HTTP（路径 B，全 async，推荐生产）；
+  否则进程内 ``assemble()``（路径 A）
 - ``prefetch`` 返 Markdown 字符串（Rail 包 ``<memory-context>`` 注入）
 - ``handle_tool_call`` 返 JSON 字符串（Rail ``json.loads``）
 - ``sync_turn`` 只 ``add`` 存原文，EXTRACT 推迟到 ``on_session_end`` 抑制每轮风暴（§4.1.2）
@@ -43,7 +44,9 @@ from jiuwen_memory.api import Scope as ApiScope
 # [本地修改 2026-06-29] provider 通过 PYTHONPATH 以顶层模块 agent_memory_provider 被 import，
 # __name__="agent_memory_provider" 不在 jiuwenswarm/openjiuwen 的 logger 树下，INFO 默认不落文件。
 # 挂到 jiuwenswarm logger 树，让 prefetch 召回日志能进 agent_server.log / full.log。
-logger = logging.getLogger("jiuwenswarm.agents.harness.common.memory.external.agent_memory_provider")
+logger = logging.getLogger(
+    "jiuwenswarm.agents.harness.common.memory.external.agent_memory_provider"
+)
 
 # --------------------------------------------------------------------------- #
 # 工具 schema（OpenAI 风格，Rail 据此自动包 ToolCard，见 §4.8）
@@ -102,7 +105,9 @@ PROCEDURAL_SCHEMA: dict[str, Any] = {
         "properties": {
             "content": {
                 "type": "string",
-                "description": "The conversation/turn content to summarize into a procedural memory.",
+                "description": (
+                    "The conversation/turn content to summarize into a procedural memory."
+                ),
             }
         },
         "required": ["content"],
@@ -242,7 +247,9 @@ class AgentMemoryMemoryProvider(MemoryProvider):
 
     async def handle_tool_call(self, tool_name: str, args: dict) -> str:
         """LLM 调工具时触发；返 JSON 字符串（Rail 会 ``json.loads``）。"""
-        logger.info("[AgentMemoryMemoryProvider] handle_tool_call CALLED tool=%s args=%s", tool_name, args)
+        logger.info(
+            "[AgentMemoryMemoryProvider] handle_tool_call CALLED tool=%s args=%s", tool_name, args
+        )
         if self._client is None:
             return json.dumps({"error": "provider not initialized"})
         scope = self.bound_scope()
@@ -254,7 +261,9 @@ class AgentMemoryMemoryProvider(MemoryProvider):
                     logger.info("[AgentMemoryMemoryProvider] agent_memory_profile -> no memories")
                     return json.dumps({"result": "No memories stored yet."})
                 lines = [it["content"] for it in items if it.get("content")]
-                logger.info("[AgentMemoryMemoryProvider] agent_memory_profile -> count=%d", len(lines))
+                logger.info(
+                    "[AgentMemoryMemoryProvider] agent_memory_profile -> count=%d", len(lines)
+                )
                 for idx, line in enumerate(lines):
                     logger.info("[AgentMemoryMemoryProvider] profile hit[%d]: %s", idx, line[:300])
                 return json.dumps({"result": "\n".join(lines), "count": len(lines)})
@@ -266,7 +275,10 @@ class AgentMemoryMemoryProvider(MemoryProvider):
                 top_k = min(int(args.get("top_k", _DEFAULT_SEARCH_TOP_K)), _MAX_TOP_K)
                 items = await self._client.search(query, scope, top_k=top_k)
                 if not items:
-                    logger.info("[AgentMemoryMemoryProvider] agent_memory_search query=%r -> no relevant", query)
+                    logger.info(
+                        "[AgentMemoryMemoryProvider] agent_memory_search query=%r -> no relevant",
+                        query,
+                    )
                     return json.dumps({"result": "No relevant memories found."})
                 payload = [
                     {"memory": it.get("content", ""), "score": it.get("score", 0)}
@@ -290,7 +302,9 @@ class AgentMemoryMemoryProvider(MemoryProvider):
                 # 原样存（对齐常见记忆层 infer=False）；add_async 会自动触发 background
                 # EXTRACT，但默认占位空转（§4.1.1），需配 extractor:llm 才真抽取。
                 await self._client.add(conclusion, scope, tags=["conclude"])
-                logger.info("[AgentMemoryMemoryProvider] agent_memory_conclude stored=%r", conclusion[:300])
+                logger.info(
+                    "[AgentMemoryMemoryProvider] agent_memory_conclude stored=%r", conclusion[:300]
+                )
                 return json.dumps({"result": "Fact stored."})
 
             if tool_name == "agent_memory_procedural":
@@ -321,18 +335,28 @@ class AgentMemoryMemoryProvider(MemoryProvider):
             logger.info("[AgentMemoryMemoryProvider] handle_tool_call unknown tool=%s", tool_name)
             return json.dumps({"error": f"Unknown tool: {tool_name}"})
         except Exception as exc:
-            logger.warning("[AgentMemoryMemoryProvider] handle_tool_call '%s' failed: %s", tool_name, exc)
+            logger.warning(
+                "[AgentMemoryMemoryProvider] handle_tool_call '%s' failed: %s", tool_name, exc
+            )
             return json.dumps({"error": str(exc)})
 
     async def prefetch(self, query: str, **kwargs: Any) -> str:
         """返 Markdown 字符串，Rail 包 ``<memory-context>`` 注入提示词。"""
-        logger.info("[AgentMemoryMemoryProvider] prefetch CALLED query=%r client=%s", query, bool(self._client))
+        logger.info(
+            "[AgentMemoryMemoryProvider] prefetch CALLED query=%r client=%s",
+            query,
+            bool(self._client),
+        )
         if not query or self._client is None:
             return ""
         # [本地修改 2026-06-29] 剥 TUI 信封，用纯 content 检索，避免命中对话原文壳。
         search_query = self._strip_tui_envelope(query)
         if search_query != query:
-            logger.info("[AgentMemoryMemoryProvider] prefetch stripped envelope: %r -> %r", query, search_query)
+            logger.info(
+                "[AgentMemoryMemoryProvider] prefetch stripped envelope: %r -> %r",
+                query,
+                search_query,
+            )
         top_k = min(int(kwargs.get("top_k", _DEFAULT_PREFETCH_TOP_K)), _MAX_TOP_K)
         try:
             logger.info(
@@ -345,7 +369,8 @@ class AgentMemoryMemoryProvider(MemoryProvider):
             lines = [it.get("content", "") for it in items if it.get("content")]
             # [本地修改 2026-06-29] 打印 prefetch 召回的记忆，便于排查外接记忆是否生效。
             logger.info(
-                "[AgentMemoryMemoryProvider] prefetch search_query=%r scope=%s top_k=%d recalled=%d",
+                "[AgentMemoryMemoryProvider] prefetch search_query=%r scope=%s "
+                "top_k=%d recalled=%d",
                 search_query, self.bound_scope(), top_k, len(lines),
             )
             for idx, line in enumerate(lines):
@@ -669,7 +694,9 @@ class _InProcessClient(_AgentMemoryClient):
             from pathlib import Path
 
             p = Path(config_path)
-            data = _json.loads(p.read_text(encoding="utf-8")) if p.suffix == ".json" else _load_yaml(p)
+            data = (
+                _json.loads(p.read_text(encoding="utf-8")) if p.suffix == ".json" else _load_yaml(p)
+            )
             config = data
         self._api = assemble(config=config)
 
@@ -751,7 +778,9 @@ def _load_yaml(path):
     try:
         import yaml
     except ImportError as exc:
-        raise RuntimeError("PyYAML required to load YAML config; install with `uv sync --extra deploy`") from exc
+        raise RuntimeError(
+            "PyYAML required to load YAML config; install with `uv sync --extra deploy`"
+        ) from exc
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 

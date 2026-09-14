@@ -193,7 +193,8 @@ class LocalKeyProvider:
             "(4) security.default.params.key_file=<path> to existing file; "
             "(5) security.default.params.create_key_file=true for dev/single-node auto-generation. "
             "Generate a key with: openssl rand -hex 32. "
-            "Refusing to assemble: encryption cannot proceed without a key (fail-closed per F04 §5)."
+            "Refusing to assemble: encryption cannot proceed without a key "
+            "(fail-closed per F04 §5)."
         )
 
     def _create_key_file(self) -> bytes:
@@ -334,11 +335,11 @@ def _parse_envelope(ciphertext: bytes) -> _Envelope:
     if len(ciphertext) < offset + body_len:
         raise CorruptedCiphertextError("ENC1 envelope length is incomplete")
 
-    encrypted_key = ciphertext[offset: offset + key_len]
+    encrypted_key = ciphertext[offset : offset + key_len]
     offset += key_len
-    key_nonce = ciphertext[offset: offset + key_nonce_len]
+    key_nonce = ciphertext[offset : offset + key_nonce_len]
     offset += key_nonce_len
-    data_nonce = ciphertext[offset: offset + data_nonce_len]
+    data_nonce = ciphertext[offset : offset + data_nonce_len]
     offset += data_nonce_len
     encrypted_content = ciphertext[offset:]
     if not encrypted_content:
@@ -455,9 +456,7 @@ def _decode_b64_key(value: str, *, source: str) -> bytes:
 
 def _validate_root_key(key: bytes, *, source: str) -> bytes:
     if len(key) != DATA_KEY_SIZE:
-        raise ValidationError(
-            f"encryption root key from {source} must be {DATA_KEY_SIZE} bytes"
-        )
+        raise ValidationError(f"encryption root key from {source} must be {DATA_KEY_SIZE} bytes")
     return key
 
 
@@ -466,7 +465,6 @@ def _restrict_file_mode(path: Path) -> None:
         os.chmod(path, 0o600)
     except OSError as exc:
         raise BackendError(f"failed to set key file permissions: {path}") from exc
-
 
 
 @SecurityProducer.register("local")

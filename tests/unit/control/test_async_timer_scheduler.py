@@ -292,7 +292,8 @@ def test_submit_timer_changed_interval_recomputes_next_run_at_from_last_fired() 
 def test_submit_timer_changed_interval_recomputes_from_submit_time_when_never_fired() -> None:
     """同 kind + interval 变化 + 从未触发 → next_run_at = submit_time + 新 interval。
 
-    首次 submit 后从未触发时 next_run_at = submit_time + 旧 interval，回退得 submit_time 再加新 interval。
+    首次 submit 后从未触发时 next_run_at = submit_time + 旧 interval，回退得 submit_time 再加新
+    interval。
     """
 
     scheduler = AsyncTimerScheduler(tick_interval=1)

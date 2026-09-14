@@ -46,9 +46,16 @@ class KeywordClassifier(Classifier):
             topic = self._topic(unit.content)
             if topic and topic not in unit.tags:
                 unit.tags.append(topic)
-            logger.info("KeywordClassifier: unit id=%s content=%s → tier=%s→%s, topic=%s, tags=%s→%s",
-                         unit.id[:8], unit.content[:200], old_tier, unit.tier.value,
-                         topic, old_tags, unit.tags)
+            logger.info(
+                "KeywordClassifier: unit id=%s content=%s → tier=%s→%s, topic=%s, tags=%s→%s",
+                unit.id[:8],
+                unit.content[:200],
+                old_tier,
+                unit.tier.value,
+                topic,
+                old_tags,
+                unit.tags,
+            )
         logger.info("KeywordClassifier: classified %d units", len(units))
         return units
 

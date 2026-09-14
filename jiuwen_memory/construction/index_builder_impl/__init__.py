@@ -1,7 +1,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """index_builder_impl 实现集：工厂 IndexBuilderProducer + 各实现。
 
-import 各实现模块即触发其 ``@IndexBuilderProducer.register(...)`` 自注册；本包只对外暴露工厂 IndexBuilderProducer。
+import 各实现模块即触发其 ``@IndexBuilderProducer.register(...)`` 自注册；本包只对外暴露工厂
+IndexBuilderProducer。
 """
 
 from importlib import import_module
@@ -13,6 +14,8 @@ import_module(".fulltext_index_builder", __name__)
 import_module(".vector_index_builder", __name__)
 import_module(".hybrid_index_builder", __name__)
 import_module(".unified_index_builder", __name__)
-import_module(".entity_index_builder", __name__)  # entity 子 builder（被 HybridIndexBuilder 组合，不自注册）
+import_module(
+    ".entity_index_builder", __name__
+)  # entity 子 builder（被 HybridIndexBuilder 组合，不自注册）
 
 __all__ = ["IndexBuilderProducer"]

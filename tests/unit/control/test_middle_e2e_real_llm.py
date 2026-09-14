@@ -377,7 +377,9 @@ async def test_in_memory_in_process() -> None:
             f"got {persisted_s2.lifecycle}"
         )
         assert persisted_s2.tier == MemoryTier.WORKING
-        logger.info(f"\n[step 2] bob write id={bob_original_id} lifecycle={persisted_s2.lifecycle.value}")
+        logger.info(
+            f"\n[step 2] bob write id={bob_original_id} lifecycle={persisted_s2.lifecycle.value}"
+        )
         # 立即 recall + list
         list_after_s2 = await _list_via_thread(api)
         recall_s2 = await _recall_async(kernel, "bob kyoto", ctx)
@@ -422,7 +424,9 @@ async def test_in_memory_in_process() -> None:
             f"InProcessScheduler step 4 应立即 ARCHIVED 原文 {dave_original_id}，"
             f"got {persisted_s4.lifecycle}"
         )
-        logger.info(f"\n[step 4] dave write id={dave_original_id} lifecycle={persisted_s4.lifecycle.value}")
+        logger.info(
+            f"\n[step 4] dave write id={dave_original_id} lifecycle={persisted_s4.lifecycle.value}"
+        )
         # 立即 recall + list
         list_after_s4 = await _list_via_thread(api)
         recall_s4 = await _recall_async(kernel, "dave hiking", ctx)
@@ -437,7 +441,8 @@ async def test_in_memory_in_process() -> None:
         assert any("dave" in u.content.lower() or "hiking" in u.content.lower()
                    for u in list_after_s4.items), "step 4 后 list 应有 dave 派生"
 
-        # 最终 list 查看记忆——应有 4 步所有派生记忆（middle=true 路径的派生 + middle=false 路径的派生）
+        # 最终 list 查看记忆——应有 4 步所有派生记忆
+        # （middle=true 路径的派生 + middle=false 路径的派生）
         final_list = await _list_via_thread(api)
         # 4 条派生 + bob 原文 + dave 原文 = 6 条（alice/carol 原文落 /messages/ 不进 /memory/）
         assert len(final_list.items) == 6, (

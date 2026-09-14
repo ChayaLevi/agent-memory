@@ -13,7 +13,9 @@ import pytest
 
 from jiuwen_memory.common.chunker.chunker_impl.fixed_window_chunker import FixedWindowChunker
 from jiuwen_memory.common.embedder.embedder_impl.hashing_embedder import HashingEmbedder
-from jiuwen_memory.common.feature_extractor.feature_extractor_impl.keyword_feature_extractor import (
+
+# 模块路径本身已 101 列，无法折行（Python 不允许拆点号路径）。
+from jiuwen_memory.common.feature_extractor.feature_extractor_impl.keyword_feature_extractor import (  # noqa: E501
     KeywordFeatureExtractor,
 )
 from jiuwen_memory.common.tokenizer.tokenizer_impl.whitespace_tokenizer import WhitespaceTokenizer

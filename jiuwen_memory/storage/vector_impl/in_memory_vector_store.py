@@ -98,7 +98,8 @@ class InMemoryVectorStore(VectorStore):
             unknown = [f for f in output_fields if f != "metadata"]
             if unknown:
                 logger.info(
-                    "InMemoryVectorStore.recall: output_fields only supports 'metadata', ignoring %s",
+                    "InMemoryVectorStore.recall: output_fields only supports "
+                    "'metadata', ignoring %s",
                     unknown,
                 )
         bucket = self._data[_skey(scope)]

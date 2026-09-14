@@ -81,7 +81,9 @@ class InMemoryGraphStore(GraphStore):
         sk = _skey(scope)
         for nid in node_ids or []:
             self._nodes[sk].pop(nid, None)
-            for eid in [e.id for e in self._edges[sk].values() if e.source == nid or e.target == nid]:
+            for eid in [
+                e.id for e in self._edges[sk].values() if e.source == nid or e.target == nid
+            ]:
                 self._edges[sk].pop(eid, None)  # 连带删关联边
         for eid in edge_ids or []:
             self._edges[sk].pop(eid, None)

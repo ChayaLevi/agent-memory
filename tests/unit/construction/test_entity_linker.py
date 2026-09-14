@@ -137,7 +137,11 @@ class InMemoryEntityStore(EntityStore):
                     space.pop(op.record_id, None)
                     successful.append(op.record_id)
             except Exception:
-                oid = op.record_id if op.record_id is not None else (op.record.id if op.record else "?")
+                oid = (
+                    op.record_id
+                    if op.record_id is not None
+                    else (op.record.id if op.record else "?")
+                )
                 failed.append(str(oid))
         return EntityBatchResult(successful_ids=successful, failed_ids=failed)
 
@@ -573,7 +577,9 @@ def test_build_swallows_failure_but_logs_error(
 
     import logging
     logging.getLogger("agent_memory").propagate = True
-    with caplog.at_level(logging.ERROR, logger="jiuwen_memory.construction.index_builder_impl.entity_index_builder"):
+    with caplog.at_level(
+        logging.ERROR, logger="jiuwen_memory.construction.index_builder_impl.entity_index_builder"
+    ):
         # 不抛——build 不阻断
         builder.build([unit])
 
@@ -599,11 +605,13 @@ def test_build_logs_partial_failure_when_failed_count_nonzero(
     unit = _make_unit("u1", "x", entities=["Alice", "Bob"])
 
     import logging
+
     logging.getLogger("agent_memory").propagate = True
-    with caplog.at_level(logging.ERROR, logger="jiuwen_memory.construction.index_builder_impl.entity_index_builder"):
+    with caplog.at_level(
+        logging.ERROR, logger="jiuwen_memory.construction.index_builder_impl.entity_index_builder"
+    ):
         builder.build([unit])  # 不抛，返回 EntityLinkResult(failed_count=2)
 
-    assert any("partial failure" in r.message and "failed=2" in r.message
-               for r in caplog.records), (
-        "部分失败应 error 级别带 failed_count 可见，实际无对应日志"
-    )
+    assert any(
+        "partial failure" in r.message and "failed=2" in r.message for r in caplog.records
+    ), "部分失败应 error 级别带 failed_count 可见，实际无对应日志"

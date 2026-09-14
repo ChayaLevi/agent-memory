@@ -132,7 +132,8 @@ class APIReranker(Reranker):
         """对候选文本打相关性分，返回与 ``texts`` 等长、同序的分数列表。
 
         每次调用按 ConfigSource 解析 model/api_key/base_url，再按方言拼端点与 body。
-        空/纯空白的 query 或文本元素不透传后端（整批请求会被网关 400 拒绝），对应分数保持 0.0；返回值仍与 ``texts`` 等长同序。
+        空/纯空白的 query 或文本元素不透传后端（整批请求会被网关 400 拒绝），对应分数保持 0.0；
+        返回值仍与 ``texts`` 等长同序。
         """
         if not texts:
             return []

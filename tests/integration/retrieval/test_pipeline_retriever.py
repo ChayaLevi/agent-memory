@@ -13,7 +13,9 @@ from jiuwen_memory.common.bootstrap import register_plugins
 from jiuwen_memory.common.embedder.base import EmbedderProducer
 from jiuwen_memory.common.errors import BackendError, ValidationError
 from jiuwen_memory.common.factory.factory import Factory
-from jiuwen_memory.common.feature_extractor.feature_extractor_impl.keyword_feature_extractor import (
+
+# 模块路径本身已 101 列，无法折行（Python 不允许拆点号路径）。
+from jiuwen_memory.common.feature_extractor.feature_extractor_impl.keyword_feature_extractor import (  # noqa: E501
     KeywordFeatureExtractor,
 )
 from jiuwen_memory.common.reranker.base import Reranker
