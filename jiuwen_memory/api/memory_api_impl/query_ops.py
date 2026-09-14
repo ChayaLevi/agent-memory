@@ -136,7 +136,9 @@ class QueryOpsMixin:
             extensions=options,
         )
         # 权限上下文与 RetrievalQuery 共用同一规范化后的 FilterExpr（不重复转换）。
-        permission_context = _recall_permission_context(context, rq.filters)
+        permission_context = _recall_permission_context(
+            context, rq.filters, self._perm.routing_fields()
+        )
         auth, auth_context = self._authorize_with_context(
             identity,
             context.scope,
@@ -203,7 +205,11 @@ class QueryOpsMixin:
 
         ``context.scope`` 只取 ``org`` 维定组织边界，空间维由候选集给出、传了不生效。
         """
-        principal.require_principal(identity)
+        # 与单空间路径的鉴权点同一门控（见 :meth:`_authorize_with_context`）：未装配空间
+        # 治理的部署把空身份当运维通道放行，跨空间检索亦然——显式 ``spaces`` 列表的检索
+        # 不经主体反查，空身份点名查几个空间是合法的运维动作。无条件加会收紧既有行为。
+        if self._needs_space_facts():
+            principal.require_principal(identity)
         org = context.scope.org
         normalized_filters = normalize(filters)
 
@@ -226,6 +232,7 @@ class QueryOpsMixin:
                 _recall_permission_context(
                     Context(scope=target, extensions=dict(context.extensions)),
                     normalized_filters,
+                    self._perm.routing_fields(),
                 ),
                 entry="search",
             )
@@ -384,6 +391,7 @@ class QueryOpsMixin:
             memory_types,
             normalized_filters,
             normalized_extensions,
+            self._perm.routing_fields(),
         )
         auth: dict[str, str] = {}
         auth_context: PermissionContext | None = None

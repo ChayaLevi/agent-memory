@@ -389,7 +389,15 @@ def _with_author_marks(metadata: dict[str, Any] | None, identity: Scope) -> dict
     条件的结果依后端实现而定。
 
     调用点在保留键校验之后：先拒绝调用方占用这些键，再由内核写入，两者不冲突。
+
+    主体维全空的调用方跳过：未装配空间治理的部署（allow_all / sqlite）把空身份当运维
+    通道放行（:func:`require_principal` 的门控见鉴权点），到这里的空身份没有主体可推导，
+    :func:`derive_author` 会抛校验异常。这种部署下作者标记无消费者，跳过即与运维通道的
+    既有行为一致；装配了空间治理的部署里空身份在鉴权点已被 :func:`require_principal`
+    拦截，到不了这里。
     """
+    if not identity.user and not identity.agent:
+        return dict(metadata or {})  # 与正常分支同契约：恒返回新对象
     author_principal, author_agent = principal.derive_author(identity)
     return {
         **(metadata or {}),
@@ -470,6 +478,7 @@ def _write_permission_context(
 def _recall_permission_context(
     context: Context,
     filters: FilterExpr | None,
+    routing_fields: tuple[str, ...],
 ) -> PermissionContext:
     """构造查询鉴权上下文：按 **S03 的路由取值规则**解析，授权针对真正会执行的 profile。
 
@@ -478,17 +487,25 @@ def _recall_permission_context(
     调用方用 ``filters=general`` + ``extensions=coding`` 即可拿宽松策略的授权去跑
     coding profile。这里与 S03 同源解析，两侧必然指向同一个 delegate。
 
+    ``extensions`` 里**只解释 ``routing_fields`` 声明的路由键**（capability 契约：
+    「本实现鉴权路由所依据的资源字段」）——路由值按 S03 覆盖 filter 侧候选；其余键是
+    插件扩展值，对权限层不透明：既不进 ``PermissionContext.metadata``，也不隐式调用
+    ``str()``（内核原样透传给下游，见 F01「list extensions 契约」）。若全量解释，
+    调用方能借扩展键把任意值（含 ``principal_path`` 等判定依据）塞进鉴权入参，还能
+    让 ``str()`` 打在不可字符串化的对象上提前炸掉整个调用。
+
     含义是 extensions 能决定命中哪条 policy，因此各 profile 的 policy 必须与该
     profile 可触达的数据相匹配——这是部署配置的责任，路由层不做补偿（S03「routing
     不改变授权语义，只选择 delegate」）。
     """
     routed_metadata = _required_filter_metadata(filters)
     # S03「MemoryPipeline 路由规则」——extensions 优先。
-    for key, override in context.extensions.items():
-        # 归属坐标与候选空间列表不进权限上下文：前者是判定输入、后者是编排开关，都不是
-        # 路由取值。留下会被下面 str 化成 "{'project': 'p-alpha'}" / "['p_apollo']" 这样
-        # 的字符串，既污染鉴权入参，又可能与某条 policy 的路由字段撞上。
+    for key in routing_fields:
+        # 归属坐标与候选空间列表不是策略路由值：前者是判定输入、后者是编排开关。
         if key in (COORDS_KEY, EXT_SPACES):
+            continue
+        override = context.extensions.get(key)
+        if override is None:
             continue
         effective = str(override).strip()
         if effective:
@@ -507,9 +524,24 @@ def _list_permission_contexts(
     memory_types: list[str] | None,
     filters: FilterExpr | None,
     extensions: dict[str, Any],
+    routing_fields: tuple[str, ...],
 ) -> list[PermissionContext]:
+    """构造 list 鉴权上下文；``extensions`` 只解释 ``routing_fields`` 声明的路由键。
+
+    与 :func:`_recall_permission_context` 同一口径：路由键是权限层唯一解释的
+    extensions 键（S03 路由取值规则），其余插件扩展值保持不透明——不进
+    ``PermissionContext.metadata``、不隐式 ``str()``，沿
+    ``MemoryAPI -> MemoryEngine -> KVStore.list`` 原样透传（F01「list extensions
+    契约」）。全量解释会让不可字符串化的扩展对象在进入插件之前就炸掉调用，
+    还给调用方开了向鉴权入参塞任意 metadata 的口子。
+    """
     routed_metadata = _required_filter_metadata(filters)
-    for key, override in extensions.items():
+    for key in routing_fields:
+        if key in (COORDS_KEY, EXT_SPACES):
+            continue
+        override = extensions.get(key)
+        if override is None:
+            continue
         effective = str(override).strip()
         if effective:
             routed_metadata[key] = effective

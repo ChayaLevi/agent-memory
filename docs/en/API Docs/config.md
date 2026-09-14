@@ -1,5 +1,7 @@
 # Configuration and Assembly Guide
 
+Last revised: 2026-09-09
+
 Agent Memory configuration is more than a way to pass YAML fields to a constructor. It is a
 lightweight assembly mechanism built around a default topology, Producer registries, named
 instances, and dependency references. This guide explains how configuration is organized,
@@ -137,8 +139,15 @@ config = Config.from_yaml("./memory-config.yml")
 api = assemble(config=config)
 ```
 
-`Config.from_yaml()` only parses YAML; it does not expand `${ENV_VAR}`. In an SDK deployment, the
-caller must read environment variables or construct the configuration dictionary in advance.
+`Config.from_yaml()` parses YAML and expands `${ENV_VAR}` / `${ENV_VAR:-default}` from the process
+environment. When the configuration text does not live on disk (for example it comes from a config
+center or a database), use `Config.from_yaml_str(yaml_text, DASHSCOPE_API_KEY="sk-...")`. Expansion
+resolution order is **explicit argument > process environment > the `:-` default**; passing `None`
+as an explicit argument behaves like omitting it and falls through to the next source.
+Only single-level placeholders are supported: nesting (for example `${A:-${B}}`), a `}` inside a
+default value, and any escape syntax for a literal `${...}` are all unavailable. Such input raises
+`ValidationError` during parsing instead of silently producing a wrong value.
+`Config.from_dict()` is the pure-data entry point and does not expand anything.
 
 ### 3.2 HTTP, MCP, and Deployment Configuration
 
@@ -166,6 +175,7 @@ memory_api:
 |---|---|
 | `profile` | Service startup profile; not a kernel component namespace |
 | `policies` | Convenience policy configuration passed to `PolicyManager` |
+| `http.dev_identities` | Test identity map read by the HTTP development launcher; not kernel configuration |
 | `memory_api` | Kernel configuration actually passed to `Config.from_dict()` and `assemble()` |
 
 HTTP/MCP startup performs the following steps:
@@ -180,6 +190,76 @@ HTTP/MCP startup performs the following steps:
 Do not pass a complete deployment configuration containing `profile`, `policies`, and
 `memory_api` directly to the kernel `Config`. Fields such as `profile` would be treated as unknown
 Producer namespaces.
+
+### 3.3 HTTP Development Tests: Multiple Identities
+
+By default, `--auth-mode dev` ignores credentials and uses the fixed `local/developer` ROOT identity.
+To test space administration, membership permissions, or multiple users, add the following fragment
+to your own deployment configuration. Keep your existing `memory_api` storage, model, engine, and
+permission settings; a separate test configuration file is not required:
+
+```yaml
+http:
+  dev_identities:
+    test-ops:
+      actor:
+        org: local
+      role: admin
+    test-u1:
+      actor:
+        org: local
+        user: u1
+    test-u2:
+      actor:
+        org: local
+        user: u2
+    test-u1-agent:
+      actor:
+        org: local
+        user: u1
+        agent: a1
+        session: s1
+```
+
+`http` is a sibling of `memory_api`, not a child of `memory_api` or `globals`.
+This fragment only configures test identities; it does not create spaces, add members, or enable routing.
+
+```bash
+bash scripts/run-server.sh --auth-mode dev --host 127.0.0.1 --port 8137 /path/to/config.yml
+```
+
+Use `Authorization: Bearer test-u1` to select user u1, or `X-API-Key: test-u1`.
+A non-empty Bearer value takes precedence when both are present. These values select server-defined
+test identities; they are not production API keys.
+
+| Setting | Constraints |
+|---|---|
+| Map key, such as `test-u1` | Non-empty string without whitespace; chosen by the tester |
+| `actor` | Only `org`, `space`, `user`, `agent`, and `session`; all values must be strings, with a non-blank `org` |
+| `role` | Optional; defaults to `user`; accepts `user`, `admin`, or `root` |
+
+Behavior:
+
+- Read only when HTTP `dev` mode is explicitly enabled; this configuration never changes `required` into dev.
+- Without a map, the fixed identity remains. With a map, missing or unknown selectors return 401,
+  without falling back to `developer`.
+- The map must be a non-empty object, not `{}`, `null`, or a list. Invalid settings fail before binding.
+- Settings are loaded at startup; restart after changes. Under the top-level merge rules in section 9,
+  a later `http` section replaces the earlier section in full.
+- Authentication headers select the identity. Changing `scope.user` in the body does not switch the
+  caller; `scope` remains the business target.
+- `role: admin/root` does not bypass authorization. Existing rules still govern space creation,
+  membership, writes, and reads. The `test-ops` example uses an org-only actor for organization-level
+  space creation; merely changing an ordinary user's role is not sufficient.
+
+The standard HTTP launcher reads this configuration. Local CLI `--auth-mode dev` still uses its
+default fixed identity and does not automatically read `http.dev_identities`. Remote CLI can send
+the matching Bearer selector through `AGENT_MEMORY_API_KEY=test-u1`. Programmatic callers can use
+the public `build_dev_authenticator(identities=...)` helper to construct a test authenticator.
+
+Containers use the same configuration: add this section to the mounted file, keep dev mode
+explicitly enabled, and recreate the application container. Loopback restrictions are unchanged.
+Identity mapping is not production authentication; do not expose it to production or unisolated networks.
 
 ## 4. Basic Configuration Structure
 
@@ -948,7 +1028,9 @@ available.
 3. When overriding a named instance, include every `params` dependency that must be preserved.
 4. Put cross-component capability flags in `globals`.
 5. Pass only the `memory_api` section of deployment configuration to the kernel.
-6. Remember that SDK `Config.from_yaml()` does not expand environment variables.
+6. `${VAR}` placeholders are expanded by `Config.from_yaml()` / `Config.from_yaml_str()`;
+   `Config.from_dict()` never expands them, and nesting or a `}` inside a default raises
+   `ValidationError`.
 7. Do not split `memory_api` across multiple deployment files.
 8. Prefer `ConfigSource` for runtime credential or connection-address changes.
 9. Reassemble after changing a target, dependency topology, or instance count.
