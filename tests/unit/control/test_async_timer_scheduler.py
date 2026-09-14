@@ -5,8 +5,8 @@
 """
 
 from __future__ import annotations
-# pylint: disable=protected-access  # 测试代码需要访问受保护成员以断言装配链行为
 
+# pylint: disable=protected-access  # 测试代码需要访问受保护成员以断言装配链行为
 import asyncio
 import time
 
@@ -17,8 +17,6 @@ from jiuwen_memory.common.type_def import Scope
 from jiuwen_memory.control.jobs import Job
 from jiuwen_memory.control.scheduler_impl.async_timer_scheduler import (
     AsyncTimerScheduler,
-    TimerEntry,
-    TimerWheel,
 )
 from jiuwen_memory.control.types import Channel, JobInfo, JobStatus
 

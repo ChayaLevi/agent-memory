@@ -44,7 +44,6 @@ from jiuwen_memory.construction.evolver_impl.orchestrating_evolver import Orches
 from jiuwen_memory.construction.extractor import Extractor
 from jiuwen_memory.storage.base import StoreType
 from jiuwen_memory.storage.kv import KVStore
-from tests.conftest import make_storage
 from jiuwen_memory.storage.types import (
     IndexRemoveMode,
     IndexWriteMode,
@@ -52,6 +51,7 @@ from jiuwen_memory.storage.types import (
     VectorRecord,
 )
 from jiuwen_memory.storage.vector import VectorStore
+from tests.conftest import make_storage
 
 pytestmark = pytest.mark.unit
 

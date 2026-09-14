@@ -250,7 +250,7 @@ def test_e2e_write_middle_persists_originals_and_submits_job() -> None:
         assert wheel.task is not None and not wheel.task.done()
         return units
 
-    units = asyncio.run(_run())
+    asyncio.run(_run())
 
 
 # ---- 场景 2：Timer 触发 → 转长期 → 原文 ARCHIVED + index.remove ----
@@ -296,7 +296,6 @@ def test_e2e_timer_exits_when_no_candidates_left() -> None:
     """场景 3：候选转完后再次 tick 返回 is_done=true → Timer 退出 + _wheels 移除 scope。"""
     engine, scheduler, index, kv, _ = _build_engine()
     scope = Scope(org="acme", user="u1")
-    scope_key = scheduler._scope_key(scope)  # pylint: disable=protected-access
     jid_holder: dict[str, str] = {}
 
     async def _run():

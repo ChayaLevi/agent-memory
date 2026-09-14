@@ -17,16 +17,14 @@ from dataclasses import replace
 import pytest
 
 from jiuwen_memory.common.type_def import (
-    LifecycleState,
     MemoryTier,
     MemoryUnit,
     Segment,
 )
 from jiuwen_memory.common.type_def.entity import (
     EntityBatchResult,
-    EntityMention,
-    EntityOpType,
     EntityOperation,
+    EntityOpType,
     EntityRecord,
     EntityStoreFilters,
     hash_entity_text,
