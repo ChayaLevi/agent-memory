@@ -1,14 +1,15 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Verb dispatch — the single code path both the CLI and HTTP surfaces share.
+"""Legacy verb dispatch for MCP and historical in-process callers.
 
-``dispatch(srv, request) -> (status, body)`` routes a structured request
-to the assembled :class:`~server.Server`'s ``MemoryAPI`` and shapes a JSON-able
-envelope the surfaces render. Routing is a table (A20 "route by table"), not an
-if/else ladder; domain exceptions map to HTTP-ish status codes.
+``dispatch(srv, request) -> (status, body)`` routes a structured request to the
+assembled :class:`~server.Server`'s ``MemoryAPI`` and shapes the compatibility
+envelope consumed by legacy surfaces. HTTP and CLI bypass this module and derive their
+JSON contract directly from ``MemoryAPI``. Routing remains a table (A20 "route
+by table"), not an if/else ladder; domain exceptions map to status-like codes.
 
-Scope mapping happens before this module: HTTP uses a nested DTO and non-HTTP
-callers use ``legacy_request_adapter``. Routes consume the resulting
-``DispatchRequest`` and never infer actor or Scope from business payload fields.
+Scope mapping happens before this module through ``legacy_request_adapter``.
+Routes consume the resulting ``DispatchRequest`` and never infer actor or Scope
+from business payload fields.
 """
 
 from __future__ import annotations
@@ -482,6 +483,9 @@ def _add(srv, request: DispatchRequest) -> Body:
         raise ValidationError("system_metadata must be an object")
     if raw_user_metadata is not None and not isinstance(raw_user_metadata, dict):
         raise ValidationError("user_metadata must be an object")
+    occurred_at = _parse_occurred_at(
+        payload.get("occurred_at"), name="add occurred_at"
+    )
     units = srv.api.add(
         _require(payload, "content"),
         scope,
@@ -491,6 +495,7 @@ def _add(srv, request: DispatchRequest) -> Body:
         assets=payload.get("assets"),
         system_metadata=dict(raw_system_metadata or {}) or None,
         user_metadata=dict(raw_user_metadata or {}) or None,
+        occurred_at=occurred_at,
     )
     # infer=True 时引擎可能合法返回空：派生记忆全部被 dedup 判为 update/noop
     # （result.created_ids 为空，见 engine.write 的 infer 分支）。

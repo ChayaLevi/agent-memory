@@ -16,9 +16,15 @@ from jiuwen_memory.common.errors import (
     RateLimitedError,
     UnsupportedCapabilityError,
     ValidationError,
+    safe_error_message,
 )
 from jiuwen_memory.common.security.legacy import legacy_request_context
-from jiuwen_memory.common.security.request_context import new_request_context
+from jiuwen_memory.common.security.request_context import (
+    get_request_id,
+    new_request_context,
+    reset_request_id,
+    set_request_id,
+)
 from jiuwen_memory.common.security.types import (
     Action,
     Credentials,
@@ -73,6 +79,7 @@ from jiuwen_memory.retrieval import (
     TrajectoryStep,
 )
 
+from .access_security import build_dev_authenticator
 from .memory_api import MemoryAPI
 from .memory_api_impl import MemoryRuntime, assemble, assemble_runtime
 
@@ -81,6 +88,7 @@ __all__ = [
     "assemble",
     "assemble_runtime",
     "MemoryRuntime",
+    "build_dev_authenticator",
     # 数据模型（common.type_def）
     "Scope",
     "Context",
@@ -132,6 +140,9 @@ __all__ = [
     "Surface",
     "legacy_request_context",
     "new_request_context",
+    "reset_request_id",
+    "get_request_id",
+    "set_request_id",
     "set_current",
     "reset_current",
     # Access 错误映射（公开异常，transport 不识别内核内部模块）
@@ -145,4 +156,5 @@ __all__ = [
     "RateLimitedError",
     "UnsupportedCapabilityError",
     "ValidationError",
+    "safe_error_message",
 ]

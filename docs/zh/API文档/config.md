@@ -1,5 +1,7 @@
 # Config 配置与装配指南
 
+最近一次修订日期：2026-09-09
+
 Agent Memory 的 Config 不只是把 YAML 字段传给某个构造函数，而是一套基于默认拓扑、
 Producer 注册表、具名实例和依赖引用的轻量级装配机制。本指南说明配置如何组织、合并、解析
 和装配，以及哪些字段可以在运行时晚绑定。
@@ -133,8 +135,13 @@ config = Config.from_yaml("./memory-config.yml")
 api = assemble(config=config)
 ```
 
-`Config.from_yaml()` 只负责解析 YAML，不会展开 `${ENV_VAR}`。SDK 场景需要调用方自行读取
-环境变量，或提前构造配置字典。
+`Config.from_yaml()` 解析 YAML，并把字符串里的 `${ENV_VAR}` / `${ENV_VAR:-默认值}` 按进程环境
+变量展开。若配置文本不在磁盘上（例如从配置中心或数据库取出），可用
+`Config.from_yaml_str(yaml_text, DASHSCOPE_API_KEY="sk-...")`：展开优先级为**显式传参 >
+环境变量 > `${VAR:-默认值}` 里的默认值**；传 `None` 等同没传，会继续向后回落。
+只支持单层占位符：不支持嵌套写法（如 `${A:-${B}}`），默认值里不能出现 `}`，也没有产出字面
+`${...}` 的转义写法——这类输入会在解析阶段抛 `ValidationError`，而不是静默给出错误的值。
+`Config.from_dict()` 是纯数据入口，不做任何展开。
 
 ### 3.2 HTTP、MCP 和部署配置
 
@@ -162,6 +169,7 @@ memory_api:
 |---|---|
 | `profile` | 服务启动 profile，不属于内核组件命名空间 |
 | `policies` | 传给 `PolicyManager` 的便捷策略配置 |
+| `http.dev_identities` | HTTP 开发模式的测试身份映射，由 HTTP 启动器读取，不属于内核配置 |
 | `memory_api` | 真正传入 `Config.from_dict()` 和 `assemble()` 的内核配置 |
 
 HTTP/MCP 启动过程会：
@@ -175,6 +183,69 @@ HTTP/MCP 启动过程会：
 
 不能把包含 `profile`、`policies` 和 `memory_api` 的完整部署配置直接传给内核 `Config`，
 否则 `profile` 等字段会被当成未知 Producer 命名空间。
+
+### 3.3 HTTP 开发测试：配置多个身份
+
+默认 `--auth-mode dev` 忽略凭据，使用固定的 `local/developer` ROOT 身份。
+测试空间管理、成员权限或多个用户时，可以在自己的部署配置文件中增加以下片段，
+保留原来的 `memory_api` 存储、模型、引擎及权限配置，不需要额外创建专用配置文件：
+
+```yaml
+http:
+  dev_identities:
+    test-ops:
+      actor:
+        org: local
+      role: admin
+    test-u1:
+      actor:
+        org: local
+        user: u1
+    test-u2:
+      actor:
+        org: local
+        user: u2
+    test-u1-agent:
+      actor:
+        org: local
+        user: u1
+        agent: a1
+        session: s1
+```
+
+`http` 与 `memory_api` 同级，不能放进 `memory_api` 或 `globals`。
+上面只是测试身份配置，不会自动创建空间、添加成员或启用归属判定。
+
+```bash
+bash scripts/run-server.sh --auth-mode dev --host 127.0.0.1 --port 8137 /path/to/config.yml
+```
+
+请求头 `Authorization: Bearer test-u1` 选择用户 u1；也支持 `X-API-Key: test-u1`。
+两者都提供时优先使用非空 Bearer 值。标识只是服务端预设身份的选择键，不是生产 API Key。
+
+| 配置项 | 约束 |
+|---|---|
+| 映射键，如 `test-u1` | 非空字符串，不含空白；由测试方自行命名 |
+| `actor` | 仅允许 `org`、`space`、`user`、`agent`、`session`；值必须是字符串，`org` 不能为空白 |
+| `role` | 可选，默认为 `user`；可取 `user`、`admin`、`root` |
+
+生效规则：
+
+- 仅显式启用 HTTP `dev` 模式时读取；`required` 模式不会因存在此配置而切换为 dev。
+- 未配置映射时保持固定身份；配置后必须携带有效标识，缺失或未知标识返回 401，不回退到 `developer`。
+- 映射必须是非空对象，不能是 `{}`、`null` 或列表；非法配置在启动监听前报错。
+- 配置在启动时加载，修改后需要重启；多配置文件的顶层合并规则见第 9 节，后一个 `http` 段整体覆盖前一个。
+- 身份由认证头选择，修改请求体 `scope.user` 不能切换身份；`scope` 仍是业务目标。
+- `role: admin/root` 不等于绕过权限。空间创建、成员管理、写入和检索仍由原有授权规则决定；
+  测试组织级创建空间时，示例 `test-ops` 使用仅含 `org` 的主体，不能只给普通用户改一个 role。
+
+HTTP 标准启动器负责读取该配置；本地 CLI 的 `--auth-mode dev` 仍使用默认固定身份，
+不会自动读取 `http.dev_identities`。远程 CLI 可通过 `AGENT_MEMORY_API_KEY=test-u1`
+向 HTTP 服务发送对应 Bearer 标识。程序化接入可用公开
+`build_dev_authenticator(identities=...)` 构造测试认证器。
+
+容器内使用相同配置：将此段加入实际挂载的配置文件，保持显式 dev 开关并重建应用容器。
+默认回环限制保持不变；多身份映射不增加生产认证能力，不得用于生产或未隔离的共享网络。
 
 ## 4. 配置基本结构
 
@@ -912,7 +983,8 @@ target 或缺失后端依赖可能不会在启动阶段暴露。
 3. 覆盖同名实例时写全仍需保留的 `params` 依赖；
 4. 跨组件能力开关优先放在 `globals`；
 5. 部署配置只把 `memory_api` 段传给内核；
-6. SDK 的 `Config.from_yaml()` 不会展开环境变量；
+6. `${VAR}` 占位符只在 `Config.from_yaml()` / `Config.from_yaml_str()` 展开，`Config.from_dict()` 不展开；
+   嵌套占位符与含 `}` 的默认值会抛 `ValidationError`；
 7. 多个部署文件之间不要拆分 `memory_api`；
 8. 运行时切换凭证或连接地址优先使用 `ConfigSource`；
 9. 修改 target、依赖拓扑或实例数量后重新装配；

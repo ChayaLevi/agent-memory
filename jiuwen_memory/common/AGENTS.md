@@ -14,6 +14,7 @@
 | `bootstrap.py` | 统一触发各插件注册（per-layer bootstrap） |
 | `errors.py` | 自定义异常（含组件能力不匹配的 `UnsupportedCapabilityError`） |
 | `_support.py` | 跨层共用的小工具：配置值布尔归一（`as_bool`）、SSL 配置读取与装配期校验（`SslConfig`/`build_ssl_config`/`require_tls_scheme`/`require_ca_file`/`outbound_verify`/`read_ssl_config`/`reject_url_tls_params`）、scope 命名空间渲染（`SCOPE_DIMS`/`scope_segments`）、后端异常归一（`wrap_backend`）；storage、lock 与出站客户端共用，避免各写一份 |
+| `_import_support.py` | 导入容错样板的唯一归属地（`import_optional`/`import_required`/`import_required_attr`）：装配各 `*_impl` 包触发 `@Producer.register` 时逐个隔离可选依赖，单个缺失只让该插件缺席、不连坐同批其他插件、不阻断 `MemoryAPI` 构造。刻意与 `_support.py` 分家——后者讲配置值语义且连带 `type_def`/`Factory`/`errors`，本模块讲导入机制且**只依赖标准库**（51 个 `*_impl`/bootstrap 消费点各自 import 一次，自身须停在零项目依赖）；**不得**引入任何 `jiuwen_memory` 内部对象，以免装配期导入顺序反受各层先后影响。接入侧另有一份 `jiuwen_memory_entry/core/import_support.py`——Access 只允许依赖 `jiuwen_memory.api`（见 `tests/unit/api/test_access_api_boundary.py`），两侧不复用 |
 | `type_def/` | 核心数据类型定义目录 |
 | `type_def/memory.py` | MemoryUnit/Relation/Segment/Temporal/ContentLayers 等；MemoryUnit id 在完整 Scope 内唯一；KV key 前缀 `MEMORY_KEY_PREFIX`/`memory_key`（建索引记忆 `/memory/{id}`）。`ContentLayers`(l0/l1) 为分层披露标注，由 LayerAnnotator 对超阈 content 产出 |
 | `type_def/scope.py` | Scope：`org/space/user/agent/session` 五维归属；非空 `space` 是全局唯一的逻辑隔离标识且为 keyword-only，旧位置参数保持 `org/user/agent/session` 顺序。另有 `KERNEL_COORD_KEYS`——内核自带的归属坐标实体名，三项取值必须是 `Scope` 的字段名，故与该类同处 |
@@ -31,7 +32,7 @@
 | `llm/` | LLM 插件目录（`echo` / `openai` / `dashscope`） |
 | `reranker/` | Reranker 插件目录 |
 | `audit/` | AuditLogger 插件目录；`protected_audit_logger.py` 的 `ProtectedAuditLogger` 把 record 委派审计完整性 provider、query 透传，并在构造时校验 provider chain store 与 logger 是同一对象（PR3 契约，接口先行） |
-| `security/` | 安全域唯一归属地：F05 契约层（`types.py` 公共值对象、`authentication/` / `authorization/` / `cryptography/` / `protection/` 各能力 base、`request_context.py` 受控构造入口、`runtime.py`）+ 旧 `SecurityProvider` 横切接口（接口 + `local` ENC1 AES-GCM 实现）+ 过渡桥 `legacy.py`。`*_impl` 实现包暂缓合入（接口先行，见 `docs/features/common/F05-security-api-contracts.md`）。另含空间级授权判据：`space_roles.py` 两轴角色与动作矩阵、`space_decision.py` 判定链纯函数、`principal.py` 主体推导与作者标记及内核归属坐标折算、`space_predicates.py` 检索两族系统谓词的生成（收 `actor`、不访问存储，与 `space_decision.py` 的分工：后者判能否进入空间，前者定进入后可见哪些条目）（见 `docs/features/control/F07-collective-memory-design.md`） |
+| `security/` | 安全域唯一归属地：F05 契约层（`types.py` 公共值对象、`authentication/` / `authorization/` / `cryptography/` / `protection/` 各能力 base、`request_context.py` 受控构造入口、`runtime.py`）+ `authentication_impl/dev_authenticator.py` 隔离开发测试固定身份/预设身份映射认证器 + 旧 `SecurityProvider` 横切接口（接口 + `local` ENC1 AES-GCM 实现）+ 过渡桥 `legacy.py`。除 dev 认证器外的安全 `*_impl` 实现包暂缓合入（接口先行，见 `docs/features/common/F05-security-api-contracts.md`）。另含空间级授权判据：`space_roles.py` 两轴角色与动作矩阵、`space_decision.py` 判定链纯函数、`principal.py` 主体推导与作者标记及内核归属坐标折算、`space_predicates.py` 检索两族系统谓词的生成（收 `actor`、不访问存储，与 `space_decision.py` 的分工：后者判能否进入空间，前者定进入后可见哪些条目）（见 `docs/features/control/F07-collective-memory-design.md`） |
 | `lock/` | LockProvider 横切接口目录：跨实例互斥原语（接口 + `redis` / `memory` 实现）。**common 层唯一的异步契约**，只交付原语、不在业务路径加锁，见 [F06-distributed-lock.md](../../docs/features/common/F06-distributed-lock.md) |
 
 ## 行为铁律
@@ -70,7 +71,7 @@
 - 核心数据类型（MemoryUnit/Scope/Context/Relation/Chunk/AuditEvent 等）
 - 工厂注册基础设施（Factory 基类 + `TOP_NAME` 命名空间 + `build`/`build_named`/`dep` 三接口）
 - 横切接口（AuditLogger / SecurityProvider / LockProvider）
-- 安全域契约（认证/密码学/保护的抽象接口与公共安全值对象；接口先行，实现暂缓）
+- 安全域契约（认证/密码学/保护的抽象接口与公共安全值对象；仅本地测试 dev 认证器已实装，生产实现暂缓）
 - 错误类型
 - 工具函数
 
@@ -106,8 +107,8 @@
 10. LockProvider 的契约是异步的，`health()` 随之异步——这是 common 层唯一的异步组件。
     锁只交付原语，本层不在任何业务路径上加锁；在哪些临界区取锁由各消费方自行论证。
     锁是基于租约的协调机制而非共识算法，依赖方必须能容忍偶发互斥失效或自备第二道防线。
-11. `security/` 是 F05 安全域的契约层：消费方只 import 契约与值对象，不反向 import；接口先行过渡期内不启用任何新认证/授权逻辑，旧 `SecurityProvider` 继续从包顶层导出，新契约异常从各能力子包取。
-12. `RequestSecurityContext` 只经 `request_context.py` 的 `new_request_context` / `internal_context` 构造，不在各 surface 各自拼装；`legacy.py` 的 `legacy_request_context` 是过渡期唯一例外，实装 PR 与其全部调用点一并删除。
+11. `security/` 是 F05 安全域的契约与实现归属层：消费方只 import 契约与值对象，不反向 import。接口先行过渡期只实装 `DevAuthenticator`：未传 `identities` 时忽略凭据、返回固定具名 ROOT 身份；传入非空预设映射后按 `Credentials.api_key` 选择身份，缺失或未知标识拒绝。`actor` 与 `identities` 构造参数互斥，配置与每次返回的身份必须复制，避免请求之间串用。两种模式均保持 `requires_loopback_binding=True`，仅供显式开发测试；trusted/api_key、正式授权与保护实现仍暂缓。旧 `SecurityProvider` 继续从包顶层导出，新契约异常从各能力子包取。
+12. `RequestSecurityContext` 只经 `request_context.py` 的 `new_request_context` / `internal_context` 构造，不在各 surface 各自拼装；`legacy.py` 的 `legacy_request_context` 是过渡期唯一例外，实装 PR 与其全部调用点一并删除。request ID 由受控适配层或构造入口生成，只作日志/审计关联；不得来自客户端 header、query 或业务 payload，不参与 actor、target 或授权判定，并必须在请求结束时 reset。
 13. 安全域 `Grant` 在构造边界把动作迭代冻结为 `frozenset[Action]` 并拒绝非 `Action` 成员；`grant_id` 默认留空等待服务端生成，公共导出不得要求既有调用方预先提供服务端标识。
 14. `RoutingFieldsProvider` 是授权策略路由字段的单一 capability 契约；接口先行过渡期的 `PermissionManager` 与目标 `Authorizer` 共同继承，禁止各自复制同名默认实现。
 15. 审计增量验证必须经 `read_stable_snapshot(after_sequence)` 在同一快照取得精确 checkpoint 与固定链头，并令每页 `scan(..., through_sequence=快照链头)`；缺 checkpoint、序号缺口或未到快照链头都返回 `incomplete`，不得从 genesis 盲接。`AuditVerificationLimits` 是服务端可信单次资源边界，PEP 仍须截断 provider 的超量 samples。`ProtectedAuditLogger` 构造时必须满足 `provider.chain_store() is audit_logger`。

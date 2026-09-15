@@ -28,6 +28,7 @@ from jiuwen_memory.common.type_def.entity import (
     EntityOpType,
     EntityOperation,
     EntityRecord,
+    EntitySearchResult,
     EntityStoreFilters,
     hash_entity_text,
 )
@@ -38,7 +39,8 @@ from jiuwen_memory.construction.index_builder_impl.entity_index_builder import (
     EntityIndexBuilder,
     EntityLinkService,
 )
-from jiuwen_memory.storage.base import BaseStore, StoreType
+from jiuwen_memory.storage.base import StoreType
+from jiuwen_memory.storage.entity_store import EntityStore
 
 pytestmark = pytest.mark.unit
 
@@ -48,10 +50,11 @@ pytestmark = pytest.mark.unit
 # ---------------------------------------------------------------------------
 
 
-class InMemoryEntityStore(BaseStore):
+class InMemoryEntityStore(EntityStore):
     """entity 索引的内存实现，语义对齐 ElasticsearchEntityStore 的可观测行为。
 
     维护 ``_records: dict[id, EntityRecord]``，按 space_id 隔离命名空间。
+    继承 ``EntityStore``（而非 ``BaseStore``）以跟随端口 ABC 的抽象方法集。
     """
 
     def __init__(self) -> None:
@@ -60,9 +63,9 @@ class InMemoryEntityStore(BaseStore):
 
     # -- BaseStore 契约 --
     @staticmethod
-    def store_type() -> StoreType | None:
-        # ES 实现返回 None（entity 不在 StoreType 枚举，独立端口）
-        return None
+    def store_type() -> StoreType:
+        # F07 起 entity 是 StorageCapability/StoreType 第七席
+        return StoreType.ENTITY
 
     @staticmethod
     def health() -> None:
@@ -140,6 +143,18 @@ class InMemoryEntityStore(BaseStore):
                 oid = op.record_id if op.record_id is not None else (op.record.id if op.record else "?")
                 failed.append(str(oid))
         return EntityBatchResult(successful_ids=successful, failed_ids=failed)
+
+    def search(
+        self,
+        space_id: str,
+        query_vector: list[float],
+        *,
+        top_k: int,
+        filters: EntityStoreFilters,
+    ) -> list[EntitySearchResult]:
+        # hash-only 内存实现：无 kNN，返回空（语义归并阶段在 embedder 为 None
+        # 时不会走到这里，见 EntityLinkService._semantic_lookup 的短路）。
+        return []
 
     @staticmethod
     def _matches_filters(rec: EntityRecord, filters: EntityStoreFilters) -> bool:
@@ -572,6 +587,7 @@ def test_build_swallows_failure_but_logs_error(
     linker.link_memories = _boom  # type: ignore[method-assign]
 
     import logging
+    logging.getLogger("agent_memory").propagate = True
     with caplog.at_level(logging.ERROR, logger="jiuwen_memory.construction.index_builder_impl.entity_index_builder"):
         # 不抛——build 不阻断
         builder.build([unit])
@@ -598,6 +614,7 @@ def test_build_logs_partial_failure_when_failed_count_nonzero(
     unit = _make_unit("u1", "x", entities=["Alice", "Bob"])
 
     import logging
+    logging.getLogger("agent_memory").propagate = True
     with caplog.at_level(logging.ERROR, logger="jiuwen_memory.construction.index_builder_impl.entity_index_builder"):
         builder.build([unit])  # 不抛，返回 EntityLinkResult(failed_count=2)
 
