@@ -10,8 +10,6 @@
 
 from __future__ import annotations
 
-from typing import List
-
 from jiuwen_memory.common.log import get_logger, metadata_for_log, redact_for_log
 from jiuwen_memory.common.type_def import MemoryTier, MemoryUnit
 from jiuwen_memory.construction.base import OperatorType
