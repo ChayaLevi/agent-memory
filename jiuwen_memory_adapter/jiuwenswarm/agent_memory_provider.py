@@ -37,7 +37,11 @@ from jiuwen_memory.api import (
     EvolveMode,
     Modality,
     assemble,
+    install_privacy_filter,
     legacy_request_context,
+    metadata_for_log,
+    redact_for_log,
+    scope_for_log,
 )
 from jiuwen_memory.api import Scope as ApiScope
 
@@ -47,6 +51,7 @@ from jiuwen_memory.api import Scope as ApiScope
 logger = logging.getLogger(
     "jiuwenswarm.agents.harness.common.memory.external.agent_memory_provider"
 )
+install_privacy_filter(logger)
 
 # --------------------------------------------------------------------------- #
 # 工具 schema（OpenAI 风格，Rail 据此自动包 ToolCard，见 §4.8）
@@ -229,9 +234,9 @@ class AgentMemoryMemoryProvider(MemoryProvider):
             self._client = _build_client(self._base_url, self._config_path)
         self._initialized = True
         logger.info(
-            "[AgentMemoryMemoryProvider] initialized (mode=%s, user=%s, scope=%s, session=%s)",
+            "[AgentMemoryMemoryProvider] initialized (mode=%s, scope=%s)",
             "http" if self._base_url else "in-process",
-            self._user_id, self._scope_id, self._session_id,
+            scope_for_log(self.bound_scope()),
         )
 
     # -- MemoryProvider: 工具声明 + 调度 -------------------------------------- #
@@ -248,7 +253,9 @@ class AgentMemoryMemoryProvider(MemoryProvider):
     async def handle_tool_call(self, tool_name: str, args: dict) -> str:
         """LLM 调工具时触发；返 JSON 字符串（Rail 会 ``json.loads``）。"""
         logger.info(
-            "[AgentMemoryMemoryProvider] handle_tool_call CALLED tool=%s args=%s", tool_name, args
+            "[AgentMemoryMemoryProvider] handle_tool_call CALLED tool=%s args=%s",
+            tool_name,
+            metadata_for_log(args),
         )
         if self._client is None:
             return json.dumps({"error": "provider not initialized"})
@@ -265,7 +272,11 @@ class AgentMemoryMemoryProvider(MemoryProvider):
                     "[AgentMemoryMemoryProvider] agent_memory_profile -> count=%d", len(lines)
                 )
                 for idx, line in enumerate(lines):
-                    logger.info("[AgentMemoryMemoryProvider] profile hit[%d]: %s", idx, line[:300])
+                    logger.info(
+                        "[AgentMemoryMemoryProvider] profile hit[%d]: %s",
+                        idx,
+                        redact_for_log(line),
+                    )
                 return json.dumps({"result": "\n".join(lines), "count": len(lines)})
 
             if tool_name == "agent_memory_search":
@@ -276,8 +287,8 @@ class AgentMemoryMemoryProvider(MemoryProvider):
                 items = await self._client.search(query, scope, top_k=top_k)
                 if not items:
                     logger.info(
-                        "[AgentMemoryMemoryProvider] agent_memory_search query=%r -> no relevant",
-                        query,
+                        "[AgentMemoryMemoryProvider] agent_memory_search query=%s -> no relevant",
+                        redact_for_log(query),
                     )
                     return json.dumps({"result": "No relevant memories found."})
                 payload = [
@@ -285,13 +296,16 @@ class AgentMemoryMemoryProvider(MemoryProvider):
                     for it in items
                 ]
                 logger.info(
-                    "[AgentMemoryMemoryProvider] agent_memory_search query=%r -> count=%d",
-                    query, len(payload),
+                    "[AgentMemoryMemoryProvider] agent_memory_search query=%s -> count=%d",
+                    redact_for_log(query),
+                    len(payload),
                 )
                 for idx, p in enumerate(payload):
                     logger.info(
                         "[AgentMemoryMemoryProvider] search hit[%d] score=%s: %s",
-                        idx, p.get("score"), str(p.get("memory"))[:300],
+                        idx,
+                        p.get("score"),
+                        redact_for_log(p.get("memory")),
                     )
                 return json.dumps({"results": payload, "count": len(payload)})
 
@@ -303,7 +317,8 @@ class AgentMemoryMemoryProvider(MemoryProvider):
                 # EXTRACT，但默认占位空转（§4.1.1），需配 extractor:llm 才真抽取。
                 await self._client.add(conclusion, scope, tags=["conclude"])
                 logger.info(
-                    "[AgentMemoryMemoryProvider] agent_memory_conclude stored=%r", conclusion[:300]
+                    "[AgentMemoryMemoryProvider] agent_memory_conclude stored=%s",
+                    redact_for_log(conclusion),
                 )
                 return json.dumps({"result": "Fact stored."})
 
@@ -319,8 +334,9 @@ class AgentMemoryMemoryProvider(MemoryProvider):
                     content, scope, system_metadata={"procedural": "true"}
                 )
                 logger.info(
-                    "[AgentMemoryMemoryProvider] agent_memory_procedural summarized=%r item_id=%s",
-                    content[:300], item_id,
+                    "[AgentMemoryMemoryProvider] agent_memory_procedural summarized=%s item_id=%s",
+                    redact_for_log(content),
+                    item_id,
                 )
                 # add 返回 None：extractor 产空（LLM 返回不可解析/未产出候选）→ 未持久化任何记忆。
                 # 不可报成功（false success）——evolver 吞掉 LLM 失败返回空 EvolveResult，
@@ -336,15 +352,17 @@ class AgentMemoryMemoryProvider(MemoryProvider):
             return json.dumps({"error": f"Unknown tool: {tool_name}"})
         except Exception as exc:
             logger.warning(
-                "[AgentMemoryMemoryProvider] handle_tool_call '%s' failed: %s", tool_name, exc
+                "[AgentMemoryMemoryProvider] handle_tool_call '%s' failed: error_type=%s",
+                tool_name,
+                type(exc).__name__,
             )
             return json.dumps({"error": str(exc)})
 
     async def prefetch(self, query: str, **kwargs: Any) -> str:
         """返 Markdown 字符串，Rail 包 ``<memory-context>`` 注入提示词。"""
         logger.info(
-            "[AgentMemoryMemoryProvider] prefetch CALLED query=%r client=%s",
-            query,
+            "[AgentMemoryMemoryProvider] prefetch CALLED query=%s client=%s",
+            redact_for_log(query),
             bool(self._client),
         )
         if not query or self._client is None:
@@ -353,36 +371,46 @@ class AgentMemoryMemoryProvider(MemoryProvider):
         search_query = self._strip_tui_envelope(query)
         if search_query != query:
             logger.info(
-                "[AgentMemoryMemoryProvider] prefetch stripped envelope: %r -> %r",
-                query,
-                search_query,
+                "[AgentMemoryMemoryProvider] prefetch stripped envelope: %s -> %s",
+                redact_for_log(query),
+                redact_for_log(search_query),
             )
         top_k = min(int(kwargs.get("top_k", _DEFAULT_PREFETCH_TOP_K)), _MAX_TOP_K)
         try:
             logger.info(
                 "[AgentMemoryMemoryProvider] prefetch before search scope=%s top_k=%d",
-                self.bound_scope(),
+                scope_for_log(self.bound_scope()),
                 top_k,
             )
-            items = await self._client.search(search_query, self.bound_scope(), top_k=top_k)
+            items = await self._client.search(
+                search_query, self.bound_scope(), top_k=top_k
+            )
             logger.info("[AgentMemoryMemoryProvider] prefetch after search items=%d", len(items))
             lines = [it.get("content", "") for it in items if it.get("content")]
             # [本地修改 2026-06-29] 打印 prefetch 召回的记忆，便于排查外接记忆是否生效。
             logger.info(
-                "[AgentMemoryMemoryProvider] prefetch search_query=%r scope=%s "
+                "[AgentMemoryMemoryProvider] prefetch search_query=%s scope=%s "
                 "top_k=%d recalled=%d",
-                search_query, self.bound_scope(), top_k, len(lines),
+                redact_for_log(search_query),
+                scope_for_log(self.bound_scope()),
+                top_k,
+                len(lines),
             )
             for idx, line in enumerate(lines):
                 logger.info(
                     "[AgentMemoryMemoryProvider] prefetch hit[%d]: %s",
-                    idx, line[:500],
+                    idx,
+                    redact_for_log(line),
                 )
             return (
                 "## AgentMemory Memory\n" + "\n".join(f"- {line}" for line in lines)
             ) if lines else ""
         except Exception as exc:
-            logger.warning("[AgentMemoryMemoryProvider] prefetch failed: %s", exc, exc_info=True)
+            logger.warning(
+                "[AgentMemoryMemoryProvider] prefetch failed: error_type=%s",
+                type(exc).__name__,
+                exc_info=True,
+            )
             return ""
 
     # -- MemoryProvider: 每轮回写（after_invoke，非心跳/cron） --------------- #
@@ -405,18 +433,28 @@ class AgentMemoryMemoryProvider(MemoryProvider):
         if not user_msg or not assistant_msg or self._client is None:
             return
         content = f"user: {user_msg}\nassistant: {assistant_msg}"
+        system_metadata = {"infer": "true"}
         logger.info(
-            "[AgentMemoryMemoryProvider] sync_turn add(infer=true) scope=%s content_len=%d",
-            self.bound_scope(), len(content),
+            "[AgentMemoryMemoryProvider] sync_turn add system_metadata=%s "
+            "scope=%s content_len=%d",
+            metadata_for_log(system_metadata),
+            scope_for_log(self.bound_scope()),
+            len(content),
         )
         try:
             await self._client.add(
                 content, self.bound_scope(),
-                tags=["conversation"], system_metadata={"infer": "true"},
+                tags=["conversation"], system_metadata=system_metadata,
             )
-            logger.info("[AgentMemoryMemoryProvider] sync_turn add(infer=true) done")
+            logger.info(
+                "[AgentMemoryMemoryProvider] sync_turn add system_metadata=%s done",
+                metadata_for_log(system_metadata),
+            )
         except Exception as exc:
-            logger.warning("[AgentMemoryMemoryProvider] sync_turn add failed: %s", exc)
+            logger.warning(
+                "[AgentMemoryMemoryProvider] sync_turn add failed: error_type=%s",
+                type(exc).__name__,
+            )
 
     # -- MemoryProvider: 静态提示词 + 生命周期（非抽象，有默认） -------------- #
 
@@ -445,13 +483,16 @@ class AgentMemoryMemoryProvider(MemoryProvider):
             return
         logger.info(
             "[AgentMemoryMemoryProvider] on_session_end CALLED scope=%s, triggering EXTRACT",
-            self.bound_scope(),
+            scope_for_log(self.bound_scope()),
         )
         try:
             await self._client.evolve_extract(self.bound_scope())
             logger.info("[AgentMemoryMemoryProvider] session-end EXTRACT done")
         except Exception as exc:
-            logger.warning("[AgentMemoryMemoryProvider] on_session_end EXTRACT failed: %s", exc)
+            logger.warning(
+                "[AgentMemoryMemoryProvider] on_session_end EXTRACT failed: error_type=%s",
+                type(exc).__name__,
+            )
 
     # -- 内部：Scope 映射 ---------------------------------------------------- #
 
@@ -594,7 +635,10 @@ class _HttpClient(_AgentMemoryClient):
         logger.info(
             "[AgentMemoryMemoryProvider] HTTP POST /v1/add tags=%s system_metadata=%s "
             "user_metadata=%s content_len=%d",
-            tags, system_metadata, user_metadata, len(content),
+            metadata_for_log(tags or []),
+            metadata_for_log(system_metadata or {}),
+            metadata_for_log(user_metadata or {}),
+            len(content),
         )
         data = await self._request("/v1/add", payload, timeout=180.0)
         logger.info(
@@ -612,8 +656,9 @@ class _HttpClient(_AgentMemoryClient):
         # unit_id/score/content），HTTP 模式返回全部命中（含 EPISODIC 原文）。
         payload = self._scope_payload(scope) | {"query": query, "k": top_k}
         logger.info(
-            "[AgentMemoryMemoryProvider] HTTP POST /v1/search query=%r k=%d",
-            query, top_k,
+            "[AgentMemoryMemoryProvider] HTTP POST /v1/search query=%s k=%d",
+            redact_for_log(query),
+            top_k,
         )
         data = await self._request("/v1/search", payload)
         hits = data.get("hits", [])

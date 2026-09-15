@@ -5,10 +5,9 @@ import 各实现模块即触发其 ``@GovernorProducer.register(...)`` 自注册
 GovernorProducer。
 """
 
-from importlib import import_module
-
+from jiuwen_memory.common._import_support import import_optional
 from jiuwen_memory.control.governance import GovernorProducer
 
-import_module(".in_memory_governor", __name__)
+import_optional(".in_memory_governor", __name__)
 
 __all__ = ["GovernorProducer"]

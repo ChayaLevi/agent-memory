@@ -10,7 +10,9 @@
 
 from __future__ import annotations
 
-from jiuwen_memory.common.log import get_logger
+from typing import List
+
+from jiuwen_memory.common.log import get_logger, metadata_for_log, redact_for_log
 from jiuwen_memory.common.type_def import MemoryTier, MemoryUnit
 from jiuwen_memory.construction.base import OperatorType
 from jiuwen_memory.construction.classifier import Classifier, ClassifierProducer
@@ -45,14 +47,15 @@ class KeywordClassifier(Classifier):
             if topic and topic not in unit.tags:
                 unit.tags.append(topic)
             logger.info(
-                "KeywordClassifier: unit id=%s content=%s → tier=%s→%s, topic=%s, tags=%s→%s",
+                "KeywordClassifier: unit id=%s content=%s → tier=%s→%s, "
+                "topic=%s, tags=%s→%s",
                 unit.id[:8],
-                unit.content[:200],
+                redact_for_log(unit.content),
                 old_tier,
                 unit.tier.value,
-                topic,
-                old_tags,
-                unit.tags,
+                metadata_for_log(topic),
+                metadata_for_log(old_tags),
+                metadata_for_log(unit.tags),
             )
         logger.info("KeywordClassifier: classified %d units", len(units))
         return units

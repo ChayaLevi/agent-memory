@@ -11,7 +11,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from jiuwen_memory.common.log import get_logger
+from jiuwen_memory.common.log import get_logger, redact_for_log
 from jiuwen_memory.common.type_def import (
     MemoryTier,
     MemoryUnit,
@@ -47,7 +47,7 @@ class ConcatAbstractor(Abstractor):
                 u.lifecycle.value,
                 u.tier.value,
                 u.provenance,
-                u.content[:200],
+                redact_for_log(u.content),
             )
         if len(sources) < 2:
             logger.info("ConcatAbstractor: fewer than 2 active sources, no output")
@@ -78,7 +78,7 @@ class ConcatAbstractor(Abstractor):
                 r.id[:8],
                 r.tier.value,
                 r.provenance,
-                r.content[:200],
+                redact_for_log(r.content),
             )
         return result
 

@@ -5,12 +5,11 @@ import 各实现模块即触发其 ``@VectorProducer.register(...)`` 自注册�
 VectorProducer。
 """
 
-from importlib import import_module
-
+from jiuwen_memory.common._import_support import import_optional
 from jiuwen_memory.storage.vector import VectorProducer
 
-import_module(".in_memory_vector_store", __name__)
-import_module(".milvus_vector", __name__)
-import_module(".pgvector_vector", __name__)
+import_optional(".in_memory_vector_store", __name__)
+import_optional(".milvus_vector", __name__)
+import_optional(".pgvector_vector", __name__)
 
 __all__ = ["VectorProducer"]
