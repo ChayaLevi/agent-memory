@@ -1,7 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """BM25 粗排算子 —— 在候选并集上补一路统一的词法信号，再做 CombMAX 融合。
 
-注册名 ``BM25_scored_fusor`` 由总部指定，与配置里的 ``fuser.default.target`` 取值
+注册名 ``BM25_scored_fuser`` 由总部指定，与配置里的 ``fuser.default.target`` 取值
 逐字对应；类名/文件名沿用本目录的 ``Fuser`` 命名。
 
     combined(u) = max( max_c  weight_c × norm_c(u),  w_lex × norm_bm25(u) )
@@ -123,7 +123,7 @@ class BM25ScoredFuser(Fuser):
         ordered = sorted(self._channel_weights.items(), key=lambda item: item[0].value)
         weights = ",".join(f"{ch.value}={w:g}" for ch, w in ordered)
         return {
-            "strategy": "BM25_scored_fusor",
+            "strategy": "BM25_scored_fuser",
             "normalization": "channel_max",
             "k1": f"{self._k1:g}",
             "b": f"{self._b:g}",
@@ -255,7 +255,7 @@ class BM25ScoredFuser(Fuser):
 # -- 注册到 FuserProducer（实现自注册，新增无需改 producer/build_kernel） -------- #
 
 
-@FuserProducer.register("BM25_scored_fusor")
+@FuserProducer.register("BM25_scored_fuser")
 def _build(config):
     return BM25ScoredFuser(
         tokenizer=TokenizerProducer.dep(config, default="whitespace"),

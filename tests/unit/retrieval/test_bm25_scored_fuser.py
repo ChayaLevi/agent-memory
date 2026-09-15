@@ -43,7 +43,7 @@ def test_registered_and_params_read_from_config() -> None:
     Factory.reset_all()
     try:
         fuser = FuserProducer.build(
-            "BM25_scored_fusor",
+            "BM25_scored_fuser",
             {"tokenizer": "default", "bm25_k1": 1.5, "bm25_b": 0.4},
             default_context(),
         )
